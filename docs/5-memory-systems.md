@@ -1,200 +1,223 @@
 # 5: Memory Systems
 
 **Created**: 2025-05-26  
-**Last Modified**: 2025-05-26
+**Last Modified**: 2025-05-27
 
 ## What You'll Learn
 
-Module 5 dives deep into LangGraph's memory systems - the foundation for building AI applications that truly understand and remember their users. You'll master the Store API for persistent cross-thread memory, learn to design effective memory schemas using Pydantic models, implement safe updates with the Trustcall library, and build production-ready agents that maintain context across thousands of conversations. By the end, you'll understand how to transform stateless LLMs into intelligent assistants with genuine long-term memory.
+Module 5 explores LangGraph's memory systems - the foundation for building AI applications with genuine long-term memory. You'll master:
+
+- **Store API**: Cross-thread persistent memory that survives beyond conversations
+- **Memory Schemas**: Profile vs Collection patterns using Pydantic models
+- **Trustcall Library**: Safe, incremental updates without data loss
+- **Memory Agents**: Intelligent systems that decide what and how to remember
+- **Production Patterns**: Scaling, optimization, and maintenance strategies
 
 ## Why It Matters
 
-Memory is the difference between a chatbot and an intelligent assistant. Without memory, every conversation starts from zero - users must repeatedly explain their preferences, restate their goals, and rebuild context. This creates frustrating, impersonal experiences that fail to leverage the true potential of AI systems.
+Consider the difference between these two experiences:
 
-With proper memory systems, your applications can:
-- **Build Relationships**: Remember user preferences, history, and context across months of interaction
-- **Provide Continuity**: Pick up conversations where they left off, even weeks later
-- **Personalize Deeply**: Adapt responses based on accumulated knowledge about each user
-- **Learn and Improve**: Track patterns and preferences to provide better assistance over time
-- **Scale Efficiently**: Handle thousands of concurrent users with isolated memory spaces
+**Without Memory:**
+```
+User: "Schedule our standup for 9 AM as we discussed"
+AI: "I don't have any previous context. What standup?"
+User: "The daily engineering standup we talked about yesterday!"
+AI: "I don't have access to yesterday's conversation."
+```
+
+**With Memory:**
+```
+User: "Schedule our standup for 9 AM as we discussed"
+AI: "I'll schedule the daily engineering standup for 9 AM. Based on our conversation yesterday, I'll invite the frontend team and include the sprint review agenda you mentioned."
+```
+
+Memory transforms AI from a stateless tool into an intelligent partner that:
+- **Builds Relationships**: Remembers preferences, history, and context across months
+- **Provides Continuity**: Picks up conversations seamlessly, even weeks later
+- **Personalizes Deeply**: Adapts responses based on accumulated knowledge
+- **Learns Patterns**: Recognizes user habits and anticipates needs
+- **Scales Efficiently**: Handles thousands of users with isolated memory spaces
 
 ## How It Works
 
-### Core Concepts
+### Memory Architecture Deep Dive
 
-#### 1. **Memory Store Architecture**
+#### The Two-Layer Memory System
 
-LangGraph's memory system is built on a flexible key-value store architecture that supports both in-memory and persistent storage backends. At its core is the `BaseStore` class, which provides a consistent interface for memory operations regardless of the underlying storage mechanism.
+LangGraph separates memory into two complementary systems, each serving different purposes:
 
-The store uses a hierarchical namespace system similar to file directories. Namespaces are tuples that create logical groupings of related memories. For example, `("user-123", "preferences")` might contain all preference-related memories for user 123, while `("user-123", "conversations", "2024-05")` could store conversation summaries from May 2024.
+**1. Within-Thread Memory (Checkpointers)**
+- **What**: Conversation-level state that persists during a session
+- **Why**: Enables interruption, resumption, and time-travel within conversations
+- **How**: Implemented via checkpointers that snapshot graph state
 
-Within each namespace, individual memories are identified by unique keys. The combination of namespace and key provides a precise address for any piece of information in the system. Values stored can be any JSON-serializable data, though structured Pydantic models are recommended for complex data.
-
-#### 2. **Memory Types and Persistence Levels**
-
-LangGraph distinguishes between several types of memory based on scope and persistence:
-
-**Within-Thread Memory** operates at the conversation level, maintaining state throughout a single session. This includes the message history, temporary calculations, and session-specific context. It's implemented through checkpointers that can persist this state, allowing conversations to be resumed even after interruptions.
-
-**Cross-Thread Memory** persists across all conversations with a user. This is where you store long-term facts, preferences, and accumulated knowledge. It survives session boundaries and forms the foundation of personalized experiences. The Store API is specifically designed for this type of memory.
-
-**Semantic Memory** contains factual information about users - their names, locations, preferences, and interests. This is typically structured data that can be queried and updated systematically.
-
-**Procedural Memory** stores instructions and patterns for how the system should behave. This might include user-specific communication preferences ("always be formal") or task-specific instructions ("when I ask about stocks, include the ticker symbol").
-
-#### 3. **Schema Patterns for Memory Organization**
-
-The module introduces two primary patterns for organizing memories, each suited to different use cases:
-
-**Profile Schema Pattern** is used when you need a single, continuously evolving representation of a user. Think of it as a living document that gets updated with new information while preserving existing data. A user profile might start empty and gradually accumulate fields like name, location, interests, and communication preferences. The key insight is that you're always working with one profile object per user, updating it rather than replacing it.
-
-**Collection Schema Pattern** is ideal for memories that are naturally multiple and independent - like a list of todo items, conversation summaries, or saved preferences. Each memory in the collection is self-contained, and new memories are added without modifying existing ones. Collections can grow over time and support operations like filtering, sorting, and searching.
-
-#### 4. **Trustcall: Safe Schema Updates**
-
-One of the biggest challenges in memory systems is updating complex schemas without losing data. The naive approach - regenerating the entire schema from scratch - risks losing information not mentioned in the current conversation.
-
-Trustcall solves this with JSON Patch operations. Instead of regenerating entire objects, it identifies specific changes and applies them surgically. For example, if a user mentions they've moved to Seattle, Trustcall generates a patch operation to update just the location field, leaving all other profile data intact.
-
-The library also provides self-correction capabilities. If the LLM generates an invalid update (like trying to add a string to a list field), Trustcall can detect the error and retry with corrected instructions. This dramatically improves reliability in production systems.
-
-#### 5. **Memory Agents: Intelligent Persistence**
-
-Not every piece of information should be remembered. Memory agents act as intelligent gatekeepers, deciding what information is worth persisting and how it should be stored. They analyze conversations in real-time, extract relevant information, and route it to appropriate memory stores.
-
-The module's `task_mAIstro` agent demonstrates this pattern. It monitors conversations for different types of memorable information - personal facts go to the user profile, action items go to a todo list, and behavioral preferences go to an instructions store. This selective approach prevents memory bloat while ensuring important information is captured.
-
-### Python Patterns
-
-#### Building a Complete Memory System
-
-Let's build a production-ready memory system step by step, starting with the foundation and adding sophistication as we go.
+**2. Cross-Thread Memory (Store API)**
+- **What**: User-level state that persists across all conversations
+- **Why**: Enables true personalization and long-term learning
+- **How**: Key-value store with hierarchical namespaces
 
 ```python
-from langgraph.store.memory import InMemoryStore
 from langgraph.checkpoint.memory import MemorySaver
-from langgraph.graph import StateGraph, START, END
-from typing import TypedDict, Annotated, Optional
-from pydantic import BaseModel, Field
-from datetime import datetime
-import json
+from langgraph.store.memory import InMemoryStore
 
-# Initialize both memory types
-within_thread_memory = MemorySaver()  # For session persistence
-cross_thread_memory = InMemoryStore()  # For long-term memory
+# Within-thread: Conversation state
+checkpointer = MemorySaver()  
 
-class State(TypedDict):
-    messages: Annotated[list, lambda x, y: x + y]
-    user_id: str
-    memory_updates: list  # Track what was remembered
+# Cross-thread: Persistent user memory
+store = InMemoryStore()
+
+# Use both in your graph
+app = graph.compile(
+    checkpointer=checkpointer,  # For conversation state
+    store=store                  # For user memory
+)
 ```
 
-#### Implementing Profile Schema with Trustcall
+#### Store API Fundamentals
 
-The profile schema pattern requires careful design to be both flexible and maintainable:
+The Store API provides a consistent interface regardless of backend (in-memory, Redis, PostgreSQL):
 
 ```python
-from langgraph.prebuilt import TrustCall
+from langgraph.store.base import BaseStore
+from typing import Tuple
+
+# Namespaces MUST be tuples (hierarchical organization)
+namespace = ("user-123", "preferences")
+namespace = ("user-123", "conversations", "2024-12")
+
+# Basic operations
+store.put(namespace, key="favorite_color", value={"color": "blue"})
+item = store.get(namespace, key="favorite_color")
+store.delete(namespace, key="old_preference")
+
+# Search within namespace
+items = store.search(namespace)  # Returns all items in namespace
+
+# List namespaces with prefix
+namespaces = store.list_namespaces(prefix=("user-123",))
+```
+
+### Memory Schema Patterns
+
+#### Pattern 1: Profile Schema (Single Evolving Entity)
+
+Use when you have one primary entity that grows over time:
+
+```python
+from pydantic import BaseModel, Field
 from typing import Optional, List, Dict
+from datetime import datetime
 
 class UserProfile(BaseModel):
-    """Comprehensive user profile that evolves over time"""
-    # Basic information
-    name: Optional[str] = Field(None, description="User's preferred name")
-    email: Optional[str] = Field(None, description="Contact email")
-    location: Optional[str] = Field(None, description="Current city or region")
-    timezone: Optional[str] = Field(None, description="User's timezone")
+    """Single source of truth for user information"""
     
-    # Preferences and interests
-    interests: List[str] = Field(default_factory=list, description="Topics of interest")
-    communication_style: Optional[str] = Field(None, description="Preferred communication style")
-    language_preferences: List[str] = Field(default_factory=list, description="Preferred languages")
+    # Identity
+    user_id: str = Field(..., description="Unique identifier")
+    name: Optional[str] = Field(None, description="Preferred name")
+    email: Optional[str] = Field(None, description="Primary email")
     
-    # Professional information
-    occupation: Optional[str] = Field(None, description="Current job or field")
-    skills: List[str] = Field(default_factory=list, description="Professional skills")
-    current_projects: List[Dict[str, str]] = Field(default_factory=list, description="Active projects")
+    # Demographics
+    location: Optional[Dict[str, str]] = Field(
+        None, 
+        description="Location details",
+        example={"city": "Seattle", "state": "WA", "country": "USA"}
+    )
+    timezone: Optional[str] = Field(None, description="IANA timezone")
+    language: str = Field("en", description="Preferred language code")
     
-    # Behavioral preferences
-    preferred_meeting_times: List[str] = Field(default_factory=list, description="Best times for meetings")
-    learning_style: Optional[str] = Field(None, description="How user prefers to learn")
+    # Preferences
+    communication_style: Optional[str] = Field(
+        None,
+        description="How the user prefers to communicate",
+        example="formal, concise, technical"
+    )
+    interests: List[str] = Field(
+        default_factory=list,
+        description="Topics of interest"
+    )
+    
+    # Professional
+    occupation: Optional[str] = None
+    company: Optional[str] = None
+    skills: List[str] = Field(default_factory=list)
+    
+    # Behavioral patterns
+    typical_active_hours: Optional[Dict[str, str]] = Field(
+        None,
+        description="When user is typically active",
+        example={"start": "09:00", "end": "17:00", "timezone": "PST"}
+    )
     
     # Metadata
     created_at: datetime = Field(default_factory=datetime.utcnow)
-    last_updated: datetime = Field(default_factory=datetime.utcnow)
-    interaction_count: int = Field(0, description="Number of conversations")
-
-# Create the Trustcall instance with the schema
-profile_trustcall = TrustCall(UserProfile)
-
-def update_user_profile(state: State) -> State:
-    """Intelligently update user profile from conversation"""
-    user_id = state["user_id"]
-    namespace = (user_id, "profile")
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    interaction_count: int = Field(0, description="Total interactions")
+    last_seen: Optional[datetime] = None
     
-    # Retrieve existing profile
-    stored_profile = cross_thread_memory.get(namespace, "main")
-    if stored_profile:
-        profile = UserProfile(**stored_profile.value)
-    else:
-        profile = UserProfile()
-    
-    # Extract updates from recent messages
-    recent_messages = state["messages"][-10:]  # Look at recent context
-    
-    # Use Trustcall to generate patches
-    result = profile_trustcall.extract_patches(
-        messages=[{"role": m.role, "content": m.content} for m in recent_messages],
-        existing=profile,
-        instructions="""
-        Extract factual information about the user from the conversation.
-        Only include information explicitly stated by the user.
-        Do not infer or assume information.
-        Focus on persistent facts, not temporary states.
-        """
+    # Custom attributes (flexible for app-specific needs)
+    custom_attributes: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Application-specific attributes"
     )
+
+# Usage
+def get_or_create_profile(user_id: str, store: BaseStore) -> UserProfile:
+    """Retrieve existing profile or create new one"""
+    namespace = (user_id, "profile")
+    stored = store.get(namespace, "main")
     
-    if result.patches:
-        # Apply patches to create updated profile
-        updated_profile = result.apply_patches(profile)
-        updated_profile.last_updated = datetime.utcnow()
-        updated_profile.interaction_count += 1
-        
-        # Store updated profile
-        cross_thread_memory.put(
-            namespace, 
-            "main", 
-            updated_profile.model_dump()
-        )
-        
-        # Track what was updated for transparency
-        state["memory_updates"].append({
-            "type": "profile",
-            "patches": len(result.patches),
-            "timestamp": datetime.utcnow().isoformat()
-        })
-    
-    return state
+    if stored:
+        return UserProfile(**stored.value)
+    else:
+        # Create new profile with user_id
+        profile = UserProfile(user_id=user_id)
+        store.put(namespace, "main", profile.model_dump())
+        return profile
 ```
 
-#### Implementing Collection Schema Pattern
+#### Pattern 2: Collection Schema (Multiple Independent Items)
 
-Collections require different handling - each item is independent:
+Use when managing lists of similar items:
 
 ```python
+from uuid import uuid4
+from enum import Enum
+
+class Priority(str, Enum):
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+
 class TodoItem(BaseModel):
-    """Individual todo item with metadata"""
+    """Individual task with rich metadata"""
     id: str = Field(default_factory=lambda: str(uuid4()))
-    content: str = Field(..., description="What needs to be done")
+    content: str = Field(..., min_length=1, max_length=500)
+    
+    # Temporal
     created_at: datetime = Field(default_factory=datetime.utcnow)
     due_date: Optional[datetime] = None
-    priority: Optional[str] = Field(None, pattern="^(high|medium|low)$")
-    category: Optional[str] = None
-    completed: bool = False
     completed_at: Optional[datetime] = None
+    
+    # Organization
+    priority: Priority = Field(Priority.MEDIUM)
+    category: Optional[str] = Field(None, max_length=50)
+    tags: List[str] = Field(default_factory=list, max_items=10)
+    
+    # State
+    completed: bool = False
+    archived: bool = False
+    
+    # Relations
+    parent_id: Optional[str] = Field(None, description="For subtasks")
+    assigned_to: Optional[str] = None
+    
+    def complete(self) -> None:
+        """Mark item as completed"""
+        self.completed = True
+        self.completed_at = datetime.utcnow()
 
 class TodoCollection(BaseModel):
-    """Collection of todo items"""
+    """Collection of todo items with methods"""
     items: List[TodoItem] = Field(default_factory=list)
     
     def add_item(self, content: str, **kwargs) -> TodoItem:
@@ -203,417 +226,706 @@ class TodoCollection(BaseModel):
         self.items.append(item)
         return item
     
-    def complete_item(self, item_id: str) -> Optional[TodoItem]:
-        """Mark item as completed"""
+    def get_active(self) -> List[TodoItem]:
+        """Get non-completed, non-archived items"""
+        return [
+            item for item in self.items 
+            if not item.completed and not item.archived
+        ]
+    
+    def get_by_category(self, category: str) -> List[TodoItem]:
+        """Filter items by category"""
+        return [
+            item for item in self.items 
+            if item.category == category
+        ]
+    
+    def cleanup_old(self, days: int = 30) -> int:
+        """Archive old completed items"""
+        cutoff = datetime.utcnow() - timedelta(days=days)
+        archived_count = 0
+        
         for item in self.items:
-            if item.id == item_id:
-                item.completed = True
-                item.completed_at = datetime.utcnow()
-                return item
-        return None
-    
-    def get_active_items(self) -> List[TodoItem]:
-        """Get all incomplete items"""
-        return [item for item in self.items if not item.completed]
-
-# Trustcall for todo updates
-todo_trustcall = TrustCall(TodoCollection)
-
-def manage_todos(state: State) -> State:
-    """Add or update todo items based on conversation"""
-    user_id = state["user_id"]
-    namespace = (user_id, "todos")
-    
-    # Get existing todos
-    stored_todos = cross_thread_memory.get(namespace, "all")
-    if stored_todos:
-        todos = TodoCollection(**stored_todos.value)
-    else:
-        todos = TodoCollection()
-    
-    # Extract todo operations from conversation
-    result = todo_trustcall.extract_patches(
-        messages=[{"role": m.role, "content": m.content} for m in state["messages"][-5:]],
-        existing=todos,
-        instructions="""
-        Look for:
-        1. New tasks the user wants to remember
-        2. Updates to existing tasks (completion, priority changes)
-        3. Due dates or deadlines mentioned
-        
-        Only create todos for actionable items the user explicitly wants tracked.
-        """
-    )
-    
-    if result.patches:
-        # Apply updates
-        updated_todos = result.apply_patches(todos)
-        
-        # Store updated collection
-        cross_thread_memory.put(
-            namespace,
-            "all",
-            updated_todos.model_dump()
-        )
-        
-        # Track updates
-        state["memory_updates"].append({
-            "type": "todos",
-            "patches": len(result.patches),
-            "active_items": len(updated_todos.get_active_items()),
-            "timestamp": datetime.utcnow().isoformat()
-        })
-    
-    return state
-```
-
-#### Building a Memory-Aware Agent
-
-Now let's create an agent that intelligently decides when and how to use memory:
-
-```python
-from typing import Literal
-from langgraph.prebuilt import ToolNode
-
-def analyze_memory_needs(state: State) -> Literal["update_profile", "manage_todos", "continue"]:
-    """Decide what type of memory update is needed"""
-    last_message = state["messages"][-1].content.lower()
-    
-    # Simple routing logic - in production, use an LLM for this
-    if any(keyword in last_message for keyword in ["my name is", "i live in", "i work as", "i prefer"]):
-        return "update_profile"
-    elif any(keyword in last_message for keyword in ["remind me", "todo", "task", "need to"]):
-        return "manage_todos"
-    else:
-        return "continue"
-
-def chat_with_memory(state: State) -> State:
-    """Chat node that uses memory for context"""
-    user_id = state["user_id"]
-    
-    # Gather memory context
-    context_parts = []
-    
-    # Get user profile
-    profile_data = cross_thread_memory.get((user_id, "profile"), "main")
-    if profile_data:
-        profile = UserProfile(**profile_data.value)
-        context_parts.append(f"User Profile: {profile.name or 'Unknown'}, {profile.location or 'Unknown location'}")
-        if profile.interests:
-            context_parts.append(f"Interests: {', '.join(profile.interests)}")
-    
-    # Get active todos
-    todos_data = cross_thread_memory.get((user_id, "todos"), "all")
-    if todos_data:
-        todos = TodoCollection(**todos_data.value)
-        active_items = todos.get_active_items()
-        if active_items:
-            context_parts.append(f"Active todos: {len(active_items)}")
-    
-    # Add context to system message
-    context = "\n".join(context_parts) if context_parts else "No previous context available."
-    
-    # Generate response with context
-    response = llm.invoke([
-        {"role": "system", "content": f"You are a helpful assistant. User context:\n{context}"},
-        *state["messages"]
-    ])
-    
-    state["messages"].append(response)
-    return state
-
-# Build the complete graph
-def build_memory_graph():
-    builder = StateGraph(State)
-    
-    # Add nodes
-    builder.add_node("chat", chat_with_memory)
-    builder.add_node("update_profile", update_user_profile)
-    builder.add_node("manage_todos", manage_todos)
-    
-    # Add edges
-    builder.add_edge(START, "chat")
-    builder.add_conditional_edges(
-        "chat",
-        analyze_memory_needs,
-        {
-            "update_profile": "update_profile",
-            "manage_todos": "manage_todos",
-            "continue": END
-        }
-    )
-    builder.add_edge("update_profile", END)
-    builder.add_edge("manage_todos", END)
-    
-    # Compile with both memory types
-    return builder.compile(
-        checkpointer=within_thread_memory,
-        store=cross_thread_memory
-    )
-
-# Usage
-app = build_memory_graph()
-
-# Run with user configuration
-config = {
-    "configurable": {
-        "thread_id": "conversation-123",
-        "user_id": "user-456"
-    }
-}
-
-result = app.invoke(
-    {"messages": [HumanMessage("My name is Alice and I work as a data scientist")], 
-     "user_id": "user-456",
-     "memory_updates": []},
-    config=config
-)
-```
-
-#### Advanced Memory Patterns
-
-For production systems, you'll need more sophisticated patterns:
-
-```python
-class MemoryAgent:
-    """Production-ready memory management system"""
-    
-    def __init__(self, store: BaseStore):
-        self.store = store
-        self.profile_tc = TrustCall(UserProfile)
-        self.todo_tc = TrustCall(TodoCollection)
-        
-    def search_semantic_memory(self, user_id: str, query: str, limit: int = 5) -> List[Dict]:
-        """Search memories using semantic similarity"""
-        # In production, use embeddings for semantic search
-        namespace = (user_id, "semantic_memories")
-        all_memories = self.store.search(namespace)
-        
-        # Simple keyword matching for demo
-        # Replace with vector similarity in production
-        results = []
-        query_lower = query.lower()
-        
-        for memory in all_memories:
-            content = memory.value.get("content", "").lower()
-            if any(word in content for word in query_lower.split()):
-                results.append(memory.value)
-        
-        return results[:limit]
-    
-    def summarize_conversation(self, messages: List[Dict], user_id: str) -> None:
-        """Create and store conversation summary"""
-        if len(messages) < 5:  # Don't summarize short conversations
-            return
-            
-        # Generate summary using LLM
-        summary_prompt = f"""
-        Summarize this conversation in 2-3 sentences.
-        Focus on key topics discussed and any decisions made.
-        Messages: {json.dumps([m['content'] for m in messages[-20:]])}
-        """
-        
-        summary = llm.invoke(summary_prompt)
-        
-        # Store summary with metadata
-        namespace = (user_id, "conversation_summaries")
-        key = f"summary_{datetime.utcnow().isoformat()}"
-        
-        self.store.put(namespace, key, {
-            "summary": summary.content,
-            "message_count": len(messages),
-            "timestamp": datetime.utcnow().isoformat(),
-            "topics": self._extract_topics(messages)
-        })
-    
-    def _extract_topics(self, messages: List[Dict]) -> List[str]:
-        """Extract main topics from conversation"""
-        # In production, use NLP or LLM for topic extraction
-        # This is a simplified version
-        common_topics = ["work", "family", "travel", "health", "technology", "hobbies"]
-        found_topics = []
-        
-        text = " ".join([m['content'] for m in messages]).lower()
-        for topic in common_topics:
-            if topic in text:
-                found_topics.append(topic)
+            if (item.completed and 
+                item.completed_at and 
+                item.completed_at < cutoff):
+                item.archived = True
+                archived_count += 1
                 
-        return found_topics
-    
-    def cleanup_old_memories(self, user_id: str, days: int = 90) -> int:
-        """Remove old, low-value memories"""
-        cutoff_date = datetime.utcnow() - timedelta(days=days)
-        removed_count = 0
-        
-        # Check conversation summaries
-        namespace = (user_id, "conversation_summaries")
-        summaries = self.store.search(namespace)
-        
-        for summary in summaries:
-            timestamp = datetime.fromisoformat(summary.value['timestamp'])
-            if timestamp < cutoff_date:
-                self.store.delete(namespace, summary.key)
-                removed_count += 1
-        
-        return removed_count
+        return archived_count
 ```
 
-### Common Pitfalls
+### Trustcall: The Update Engine
 
-#### 1. **Data Loss Through Regeneration**
+Trustcall solves the critical problem of updating complex schemas without data loss:
 
-The most common and dangerous pitfall is regenerating entire data structures instead of updating them. This happens when developers treat memory updates like stateless operations:
+#### The Problem It Solves
 
 ```python
-# DANGEROUS - Loses all existing profile data
-def bad_update_profile(state: State):
-    # This extracts a new profile from scratch every time
-    new_profile = llm.invoke(
-        "Extract user profile from: " + str(state["messages"])
-    )
-    # All previous data is lost!
+# ❌ WRONG: Regeneration loses data
+def bad_update(conversation: str, store: BaseStore):
+    # Extract profile from current conversation
+    new_profile = llm.extract(conversation)  # Only sees current data!
+    
+    # This REPLACES the entire profile, losing all history
     store.put(namespace, "profile", new_profile)
+    # Lost: previous interests, preferences, historical data
 
-# CORRECT - Preserves existing data
-def good_update_profile(state: State):
+# ✅ RIGHT: Trustcall preserves data
+def good_update(conversation: str, store: BaseStore):
     # Get existing profile
     existing = store.get(namespace, "profile")
     profile = UserProfile(**existing.value) if existing else UserProfile()
     
-    # Extract only updates
-    patches = trustcall.extract_patches(
-        messages=state["messages"],
-        existing=profile
-    )
-    
-    # Apply updates to existing profile
-    updated = patches.apply_patches(profile)
-    store.put(namespace, "profile", updated.model_dump())
-```
-
-#### 2. **Namespace Structure Errors**
-
-Namespaces must be tuples, not strings. This is a subtle but critical requirement:
-
-```python
-# WRONG - String namespace causes errors
-namespace = f"{user_id}/memories"  # This will fail
-namespace = "user:123:profile"      # This will also fail
-
-# CORRECT - Tuple namespace
-namespace = (user_id, "memories")
-namespace = (user_id, "profile", "preferences")  # Nested is fine
-```
-
-#### 3. **Unbounded Memory Growth**
-
-Without careful management, memory stores can grow indefinitely:
-
-```python
-# PROBLEMATIC - No limits on memory growth
-def save_every_message(state: State):
-    for i, msg in enumerate(state["messages"]):
-        store.put(
-            namespace=(state["user_id"], "messages"),
-            key=f"msg_{i}_{datetime.utcnow().timestamp()}",
-            value=msg.dict()
-        )
-
-# BETTER - Strategic memory with limits
-def save_important_messages(state: State):
-    # Only save messages that contain important information
-    important_keywords = ["decision", "preference", "important", "remember"]
-    
-    for msg in state["messages"][-10:]:  # Only recent messages
-        if any(keyword in msg.content.lower() for keyword in important_keywords):
-            # Save with expiration metadata
-            store.put(
-                namespace=(state["user_id"], "important_messages"),
-                key=str(uuid4()),
-                value={
-                    "content": msg.content,
-                    "timestamp": datetime.utcnow().isoformat(),
-                    "expires_at": (datetime.utcnow() + timedelta(days=30)).isoformat()
-                }
-            )
-```
-
-#### 4. **Synchronization Issues**
-
-When multiple agents or threads access the same memory, synchronization becomes critical:
-
-```python
-# RISKY - No synchronization
-def concurrent_update(state: State):
-    profile = store.get(namespace, "profile").value
-    profile["counter"] += 1  # Race condition!
-    store.put(namespace, "profile", profile)
-
-# SAFER - Use atomic operations or locking
-def safe_concurrent_update(state: State):
-    # Use Trustcall for safe updates
+    # Extract ONLY the updates
     result = trustcall.extract_patches(
-        messages=[{"role": "system", "content": "Increment counter by 1"}],
+        messages=conversation,
         existing=profile
     )
-    # Patches are applied atomically
+    
+    # Apply updates to preserve all other data
     updated = result.apply_patches(profile)
     store.put(namespace, "profile", updated.model_dump())
 ```
 
-#### 5. **Missing Memory Context**
+#### How Trustcall Works
 
-Forgetting to use available memory context leads to poor user experience:
+Trustcall uses JSON Patch (RFC 6902) operations for surgical updates:
 
 ```python
-# POOR - Ignores user's stored preferences
-def chat_without_memory(state: State):
-    response = llm.invoke(state["messages"])
-    return {"messages": state["messages"] + [response]}
+from langgraph.prebuilt import TrustCall
+import json
 
-# EXCELLENT - Uses full memory context
-def chat_with_full_context(state: State):
-    # Gather all relevant context
-    profile = get_user_profile(state["user_id"])
-    recent_summaries = get_recent_summaries(state["user_id"], limit=3)
-    active_todos = get_active_todos(state["user_id"])
+# Initialize with your schema
+trustcall = TrustCall(UserProfile)
+
+# Example conversation
+messages = [
+    {"role": "user", "content": "I just moved from Seattle to Austin"},
+    {"role": "assistant", "content": "How are you finding Austin?"},
+    {"role": "user", "content": "Great! The tech scene here is amazing"}
+]
+
+# Extract patches (not full object!)
+result = trustcall.extract_patches(
+    messages=messages,
+    existing=current_profile,
+    instructions="""
+    Extract factual updates about the user.
+    Focus on persistent facts, not temporary states.
+    Only include explicitly stated information.
+    """
+)
+
+# Examine the patches
+print(json.dumps(result.patches, indent=2))
+# Output:
+# [
+#   {
+#     "op": "replace",
+#     "path": "/location/city",
+#     "value": "Austin"
+#   },
+#   {
+#     "op": "add",
+#     "path": "/interests/-",
+#     "value": "tech scene"
+#   }
+# ]
+
+# Apply patches to get updated profile
+updated_profile = result.apply_patches(current_profile)
+```
+
+#### Advanced Trustcall Patterns
+
+```python
+# Pattern 1: Retry with self-correction
+def robust_update(messages, profile, max_retries=3):
+    """Update with automatic retry on validation errors"""
+    for attempt in range(max_retries):
+        try:
+            result = trustcall.extract_patches(
+                messages=messages,
+                existing=profile,
+                instructions="Extract user updates"
+            )
+            
+            # Validate patches before applying
+            test_profile = profile.model_copy()
+            updated = result.apply_patches(test_profile)
+            
+            # If we get here, patches are valid
+            return updated
+            
+        except ValidationError as e:
+            if attempt == max_retries - 1:
+                raise
+            # Add error to instructions for retry
+            instructions = f"""
+            Extract user updates.
+            Previous attempt failed with: {str(e)}
+            Ensure updates match the schema types.
+            """
+
+# Pattern 2: Selective field updates
+class SelectiveTrustCall:
+    """Only update specific fields based on context"""
     
-    # Build rich context
-    context = f"""
-    User: {profile.name} from {profile.location}
-    Interests: {', '.join(profile.interests)}
-    Communication style: {profile.communication_style}
-    Recent topics: {', '.join([s['topics'] for s in recent_summaries])}
-    Active tasks: {len(active_todos)}
+    def __init__(self, schema):
+        self.trustcall = TrustCall(schema)
+        
+    def update_fields(self, messages, existing, allowed_fields):
+        """Only update specified fields"""
+        instructions = f"""
+        Extract updates ONLY for these fields: {allowed_fields}
+        Ignore all other information.
+        """
+        
+        result = self.trustcall.extract_patches(
+            messages=messages,
+            existing=existing,
+            instructions=instructions
+        )
+        
+        # Filter patches to allowed fields
+        filtered_patches = []
+        for patch in result.patches:
+            path_parts = patch["path"].split("/")
+            field = path_parts[1] if len(path_parts) > 1 else ""
+            if field in allowed_fields:
+                filtered_patches.append(patch)
+        
+        result.patches = filtered_patches
+        return result
+```
+
+### Memory Agents: Intelligent Persistence
+
+Not all information deserves to be remembered. Memory agents act as intelligent gatekeepers:
+
+```python
+from typing import Literal, Dict, Any
+from langgraph.graph import StateGraph, MessagesState
+
+class MemoryAgentState(MessagesState):
+    """State for memory-aware agent"""
+    user_id: str
+    memory_updates: List[Dict[str, Any]]
+    memory_decision: Optional[str]
+
+class MemoryAnalyzer:
+    """Decides what to remember and how"""
+    
+    def __init__(self, llm):
+        self.llm = llm
+        
+    def analyze_memory_need(self, state: MemoryAgentState) -> str:
+        """Determine memory action needed"""
+        
+        # Create analysis prompt
+        recent_messages = state["messages"][-5:]
+        
+        prompt = f"""
+        Analyze this conversation for memory-worthy information:
+        
+        {self._format_messages(recent_messages)}
+        
+        Identify:
+        1. Personal facts (name, location, preferences)
+        2. Action items (todos, reminders, tasks)
+        3. Behavioral patterns (communication style, habits)
+        4. Important context (relationships, projects)
+        
+        Return one of:
+        - "update_profile": Personal facts to remember
+        - "add_todo": Task or reminder mentioned
+        - "save_context": Important context for future
+        - "none": Nothing significant to remember
+        """
+        
+        response = self.llm.invoke(prompt)
+        return self._parse_decision(response.content)
+    
+    def _format_messages(self, messages):
+        return "\n".join([
+            f"{m.role}: {m.content}" for m in messages
+        ])
+    
+    def _parse_decision(self, response: str) -> str:
+        """Parse LLM decision"""
+        response_lower = response.lower()
+        
+        if "update_profile" in response_lower:
+            return "update_profile"
+        elif "add_todo" in response_lower or "task" in response_lower:
+            return "add_todo"
+        elif "save_context" in response_lower:
+            return "save_context"
+        else:
+            return "none"
+
+# Build the memory-aware graph
+def create_memory_agent(llm, store: BaseStore):
+    """Create an agent with intelligent memory management"""
+    
+    analyzer = MemoryAnalyzer(llm)
+    profile_tc = TrustCall(UserProfile)
+    todo_tc = TrustCall(TodoCollection)
+    
+    builder = StateGraph(MemoryAgentState)
+    
+    # Chat node that uses memory context
+    def chat_with_context(state: MemoryAgentState):
+        user_id = state["user_id"]
+        
+        # Gather memory context
+        context_parts = []
+        
+        # User profile
+        profile_data = store.get((user_id, "profile"), "main")
+        if profile_data:
+            profile = UserProfile(**profile_data.value)
+            context_parts.append(
+                f"User: {profile.name or 'Unknown'} "
+                f"from {profile.location.get('city') if profile.location else 'Unknown'}"
+            )
+            if profile.interests:
+                context_parts.append(f"Interests: {', '.join(profile.interests[:5])}")
+        
+        # Recent todos
+        todos_data = store.get((user_id, "todos"), "all")
+        if todos_data:
+            todos = TodoCollection(**todos_data.value)
+            active = todos.get_active()[:3]
+            if active:
+                context_parts.append(
+                    f"Active todos: {', '.join([t.content for t in active])}"
+                )
+        
+        # Generate response with context
+        context = "\n".join(context_parts) if context_parts else "New user"
+        
+        response = llm.invoke([
+            {"role": "system", "content": f"Context:\n{context}"},
+            *state["messages"]
+        ])
+        
+        return {"messages": [response]}
+    
+    # Memory update nodes
+    def update_profile(state: MemoryAgentState):
+        """Update user profile from conversation"""
+        user_id = state["user_id"]
+        namespace = (user_id, "profile")
+        
+        # Get existing
+        stored = store.get(namespace, "main")
+        profile = UserProfile(**stored.value) if stored else UserProfile(user_id=user_id)
+        
+        # Extract updates
+        result = profile_tc.extract_patches(
+            messages=[m.model_dump() for m in state["messages"][-10:]],
+            existing=profile,
+            instructions="""
+            Extract permanent facts about the user.
+            Focus on: name, location, occupation, interests, preferences.
+            Only include explicitly stated information.
+            """
+        )
+        
+        if result.patches:
+            updated = result.apply_patches(profile)
+            updated.updated_at = datetime.utcnow()
+            updated.interaction_count += 1
+            
+            store.put(namespace, "main", updated.model_dump())
+            
+            return {
+                "memory_updates": [{
+                    "type": "profile",
+                    "patches": len(result.patches),
+                    "timestamp": datetime.utcnow().isoformat()
+                }]
+            }
+        
+        return state
+    
+    def add_todo(state: MemoryAgentState):
+        """Extract and add todo items"""
+        user_id = state["user_id"]
+        namespace = (user_id, "todos")
+        
+        # Get existing
+        stored = store.get(namespace, "all")
+        todos = TodoCollection(**stored.value) if stored else TodoCollection()
+        
+        # Extract new todos
+        result = todo_tc.extract_patches(
+            messages=[m.model_dump() for m in state["messages"][-5:]],
+            existing=todos,
+            instructions="""
+            Look for tasks, reminders, or action items the user wants to track.
+            Include due dates if mentioned.
+            Set priority based on urgency words (urgent=high, soon=medium).
+            """
+        )
+        
+        if result.patches:
+            updated = result.apply_patches(todos)
+            store.put(namespace, "all", updated.model_dump())
+            
+            return {
+                "memory_updates": [{
+                    "type": "todos",
+                    "added": len([p for p in result.patches if p["op"] == "add"]),
+                    "timestamp": datetime.utcnow().isoformat()
+                }]
+            }
+        
+        return state
+    
+    # Routing logic
+    def route_memory(state: MemoryAgentState):
+        decision = analyzer.analyze_memory_need(state)
+        state["memory_decision"] = decision
+        return decision
+    
+    # Build graph
+    builder.add_node("chat", chat_with_context)
+    builder.add_node("update_profile", update_profile)
+    builder.add_node("add_todo", add_todo)
+    
+    # Edges
+    builder.add_edge(START, "chat")
+    builder.add_conditional_edges(
+        "chat",
+        route_memory,
+        {
+            "update_profile": "update_profile",
+            "add_todo": "add_todo",
+            "save_context": END,  # Placeholder
+            "none": END
+        }
+    )
+    builder.add_edge("update_profile", END)
+    builder.add_edge("add_todo", END)
+    
+    return builder.compile()
+```
+
+### Production Patterns
+
+#### Scaling Memory Systems
+
+```python
+class ScalableMemoryStore:
+    """Production-ready memory store with optimization"""
+    
+    def __init__(self, backend: BaseStore, cache_size: int = 1000):
+        self.backend = backend
+        self.cache = LRUCache(maxsize=cache_size)
+        self.write_buffer = []
+        self.buffer_size = 100
+        
+    def get_with_cache(self, namespace: Tuple, key: str):
+        """Get with local cache"""
+        cache_key = f"{namespace}:{key}"
+        
+        # Check cache first
+        if cache_key in self.cache:
+            return self.cache[cache_key]
+        
+        # Fetch from backend
+        value = self.backend.get(namespace, key)
+        if value:
+            self.cache[cache_key] = value
+            
+        return value
+    
+    def put_buffered(self, namespace: Tuple, key: str, value: Any):
+        """Buffer writes for batch processing"""
+        self.write_buffer.append({
+            "namespace": namespace,
+            "key": key,
+            "value": value
+        })
+        
+        # Flush when buffer is full
+        if len(self.write_buffer) >= self.buffer_size:
+            self.flush()
+    
+    def flush(self):
+        """Batch write to backend"""
+        if not self.write_buffer:
+            return
+            
+        # Group by namespace for efficiency
+        by_namespace = {}
+        for item in self.write_buffer:
+            ns = item["namespace"]
+            if ns not in by_namespace:
+                by_namespace[ns] = []
+            by_namespace[ns].append(item)
+        
+        # Batch write per namespace
+        for namespace, items in by_namespace.items():
+            # Backend-specific batch operation
+            for item in items:
+                self.backend.put(
+                    namespace, 
+                    item["key"], 
+                    item["value"]
+                )
+        
+        self.write_buffer.clear()
+
+# Memory maintenance
+class MemoryMaintenance:
+    """Handle cleanup and optimization"""
+    
+    def __init__(self, store: BaseStore):
+        self.store = store
+        
+    def cleanup_old_memories(self, user_id: str, retention_days: int = 90):
+        """Remove old, low-value memories"""
+        cutoff = datetime.utcnow() - timedelta(days=retention_days)
+        
+        # Define retention policies by type
+        policies = {
+            "conversation_summaries": 30,  # 30 days
+            "todos": 90,                   # 90 days for completed
+            "profile": None,               # Never delete
+            "preferences": None            # Never delete
+        }
+        
+        stats = {"examined": 0, "deleted": 0}
+        
+        for memory_type, retention in policies.items():
+            if retention is None:
+                continue
+                
+            namespace = (user_id, memory_type)
+            items = self.store.search(namespace)
+            
+            for item in items:
+                stats["examined"] += 1
+                
+                # Check age
+                if "timestamp" in item.value:
+                    timestamp = datetime.fromisoformat(item.value["timestamp"])
+                    if timestamp < cutoff:
+                        self.store.delete(namespace, item.key)
+                        stats["deleted"] += 1
+        
+        return stats
+    
+    def compress_memories(self, user_id: str):
+        """Compress related memories into summaries"""
+        namespace = (user_id, "conversation_summaries")
+        summaries = list(self.store.search(namespace))
+        
+        # Group by month
+        by_month = {}
+        for summary in summaries:
+            timestamp = datetime.fromisoformat(summary.value["timestamp"])
+            month_key = timestamp.strftime("%Y-%m")
+            
+            if month_key not in by_month:
+                by_month[month_key] = []
+            by_month[month_key].append(summary)
+        
+        # Compress old months
+        for month, items in by_month.items():
+            if len(items) > 20:  # Compress if too many
+                # Create monthly summary
+                compressed = self._create_monthly_summary(items)
+                
+                # Store compressed version
+                self.store.put(
+                    (user_id, "monthly_summaries"),
+                    month,
+                    compressed
+                )
+                
+                # Delete individual summaries
+                for item in items:
+                    self.store.delete(namespace, item.key)
+```
+
+### Common Pitfalls and Solutions
+
+#### 1. Data Loss Through Regeneration
+```python
+# ❌ WRONG - Loses existing data
+async def bad_profile_update(state):
+    # This only sees current conversation!
+    new_profile = await llm.extract("Extract user profile from: " + state["messages"])
+    store.put(namespace, "profile", new_profile)  # Old data gone!
+
+# ✅ CORRECT - Preserves existing data
+async def good_profile_update(state):
+    # Get existing profile
+    existing = store.get(namespace, "profile")
+    profile = UserProfile(**existing.value) if existing else UserProfile()
+    
+    # Extract only updates using Trustcall
+    result = trustcall.extract_patches(
+        messages=state["messages"],
+        existing=profile,
+        instructions="Extract only new information"
+    )
+    
+    # Apply patches to preserve existing data
+    if result.patches:
+        updated = result.apply_patches(profile)
+        store.put(namespace, "profile", updated.model_dump())
+```
+
+#### 2. Namespace Type Errors
+```python
+# ❌ WRONG - String namespaces fail
+store.put("user-123/profile", "main", data)  # TypeError!
+store.put(f"{user_id}:profile", "main", data)  # TypeError!
+
+# ✅ CORRECT - Tuple namespaces
+store.put((user_id, "profile"), "main", data)
+store.put((user_id, "profile", "preferences"), "colors", data)
+```
+
+#### 3. Unbounded Memory Growth
+```python
+# ❌ WRONG - No limits, will explode
+def save_everything(state):
+    # Saves every single message forever
+    for i, msg in enumerate(state["messages"]):
+        store.put(
+            (state["user_id"], "all_messages"),
+            f"msg_{datetime.now().timestamp()}_{i}",
+            msg.model_dump()
+        )
+
+# ✅ CORRECT - Strategic memory with limits
+def save_important_messages(state):
+    # Only save significant messages
+    importance_threshold = 0.7
+    
+    for msg in state["messages"][-10:]:  # Recent only
+        importance = analyze_importance(msg)
+        
+        if importance > importance_threshold:
+            # Save with metadata and expiration
+            store.put(
+                (state["user_id"], "important_messages"),
+                str(uuid4()),
+                {
+                    "content": msg.content,
+                    "importance": importance,
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "expires_at": (datetime.utcnow() + timedelta(days=30)).isoformat(),
+                    "context": extract_context(msg)
+                }
+            )
+```
+
+#### 4. Missing Memory Context
+```python
+# ❌ WRONG - Ignores available memory
+def basic_chat(state):
+    response = llm.invoke(state["messages"])
+    return {"messages": [response]}
+
+# ✅ CORRECT - Rich memory context
+def memory_aware_chat(state):
+    # Gather comprehensive context
+    user_id = state["user_id"]
+    
+    # Profile context
+    profile = get_profile(user_id)
+    profile_context = format_profile_context(profile)
+    
+    # Recent activity
+    recent_summaries = get_recent_summaries(user_id, days=7)
+    activity_context = format_activity_context(recent_summaries)
+    
+    # Active todos
+    todos = get_active_todos(user_id)
+    todo_context = format_todo_context(todos)
+    
+    # Preferences
+    preferences = get_preferences(user_id)
+    pref_context = format_preference_context(preferences)
+    
+    # Build system message with full context
+    system_message = f"""
+    You are assisting {profile.name or 'a returning user'}.
+    
+    Profile: {profile_context}
+    Recent Activity: {activity_context}
+    Active Tasks: {todo_context}
+    Preferences: {pref_context}
+    
+    Adapt your responses based on this context.
     """
     
-    # Generate response with full context
     response = llm.invoke([
-        {"role": "system", "content": f"User context:\n{context}"},
+        {"role": "system", "content": system_message},
         *state["messages"]
     ])
     
-    return {"messages": state["messages"] + [response]}
+    return {"messages": [response]}
 ```
+
+#### 5. Concurrent Access Issues
+```python
+# ❌ WRONG - Race conditions
+def unsafe_increment(state):
+    # Two agents could read same value
+    data = store.get(namespace, "counter")
+    count = data.value["count"]
+    count += 1  # Race condition!
+    store.put(namespace, "counter", {"count": count})
+
+# ✅ CORRECT - Atomic operations
+def safe_increment(state):
+    # Use Trustcall for atomic updates
+    result = trustcall.extract_patches(
+        messages=[{"role": "system", "content": "Increment counter by 1"}],
+        existing=current_data,
+        instructions="Add 1 to the count field"
+    )
+    
+    # Or use backend-specific atomic operations
+    # store.increment(namespace, "counter", "count", delta=1)
+```
+
+## Best Practices
+
+1. **Design for Evolution**: Start with minimal schemas and add fields as needed. Use optional fields liberally.
+
+2. **Separate Concerns**: Use different namespaces for different types of memory (profile, todos, preferences, summaries).
+
+3. **Implement Retention**: Not all memories are forever. Plan retention policies from day one.
+
+4. **Monitor Usage**: Track memory size per user, query patterns, and growth rates.
+
+5. **Test at Scale**: Memory systems behave differently with 10 vs 10,000 users. Load test early.
+
+6. **Plan for Migration**: Schema changes are inevitable. Design migration strategies upfront.
+
+7. **Security First**: Encrypt sensitive data, implement access controls, audit memory access.
 
 ## Key Takeaways
 
-1. **Design Schemas for Evolution**: Your memory schemas will need to grow and change. Design them with optional fields and clear extension points. Use Pydantic models for validation and documentation.
-
-2. **Patch, Don't Replace**: Always update existing memories rather than regenerating them. Trustcall's JSON Patch approach preserves data while allowing precise updates.
-
-3. **Namespace Strategically**: Use hierarchical namespaces to organize memories logically. Common patterns include `(user_id, memory_type, subcategory)` for deep organization.
-
-4. **Let Agents Decide**: Not everything should be remembered. Build intelligent agents that analyze conversations and selectively persist truly important information.
-
-5. **Plan for Scale**: Memory systems must handle thousands of users. Design with isolation, cleanup strategies, and efficient search from the start.
-
-6. **Monitor and Maintain**: Track memory usage, implement retention policies, and regularly clean up old or low-value memories. Production systems need active maintenance.
-
-7. **Combine Memory Types**: Use within-thread memory for conversation state and cross-thread memory for persistence. Both are necessary for complete user experiences.
+1. **Two-Layer Architecture**: Use checkpointers for conversation state, Store API for persistent memory
+2. **Schema Patterns**: Choose Profile pattern for single entities, Collection pattern for lists
+3. **Always Patch**: Use Trustcall to update, never regenerate from scratch
+4. **Intelligent Persistence**: Let agents decide what's worth remembering
+5. **Scale Thoughtfully**: Implement caching, batching, and cleanup from the start
+6. **Context is King**: Memory without usage is worthless - always incorporate context
 
 ## Next Steps
 
 Module 5 has equipped you with the knowledge to build AI systems with genuine long-term memory. Your agents can now remember users across conversations, build rich profiles over time, and provide truly personalized experiences.
 
-Module 6 will show you how to deploy these sophisticated memory-aware agents to production, handling real users at scale with proper infrastructure, monitoring, and maintenance strategies. You'll learn to turn these powerful prototypes into reliable, production-ready services.
+Module 6 will show you how to deploy these sophisticated memory-aware agents to production, handling real users at scale with proper infrastructure, monitoring, and maintenance strategies.

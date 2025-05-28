@@ -1,639 +1,286 @@
 # 6: Deployment
 
 **Created**: 2025-05-26  
-**Last Modified**: 2025-05-26
+**Last Modified**: 2025-05-27
 
 ## What You'll Learn
 
-Module 6 transforms your LangGraph experiments into production-ready services. You'll master the complete deployment lifecycle - from local development with LangGraph Studio to cloud deployment with Docker and Kubernetes. You'll learn to handle real-world challenges like concurrent requests (double-texting), implement sophisticated assistant systems with versioning, manage configuration across environments, and build scalable infrastructure that can handle thousands of users. By the end, you'll understand not just how to deploy LangGraph applications, but how to operate them reliably at scale.
+Module 6 transforms your LangGraph experiments into production-ready services. You'll master:
+
+- **Platform Architecture**: How LangGraph Server, Redis, and PostgreSQL work together
+- **Deployment Options**: Cloud, self-hosted, and local development strategies
+- **Double-Texting**: Handling concurrent requests with reject/enqueue/interrupt/rollback
+- **Production Patterns**: Health checks, monitoring, error recovery, and scaling
+- **Real-World Operations**: Configuration management, security, and maintenance
 
 ## Why It Matters
 
-The gap between a working prototype and a production service is vast. A prototype might impress in a demo, but production demands answers to hard questions: How do you handle 10,000 concurrent users? What happens when users send multiple requests before the first completes? How do you update your agent's behavior without breaking existing conversations? How do you monitor, debug, and maintain AI systems that never stop running?
+The journey from "it works on my laptop" to "it serves 10,000 users reliably" is treacherous:
 
-Production deployment is where AI applications succeed or fail. Without proper deployment:
-- **Reliability Suffers**: Crashes, timeouts, and inconsistent behavior frustrate users
-- **Scale Limits Growth**: Poor architecture prevents handling increased load
-- **Maintenance Becomes Nightmare**: No visibility into problems or ability to fix them
-- **Costs Explode**: Inefficient resource usage burns through budgets
-- **Security Fails**: Exposed endpoints and poor isolation create vulnerabilities
+**Without Proper Deployment:**
+```python
+# Monday: Launch your AI assistant
+async def handle_request(message):
+    return await graph.invoke({"messages": [message]})  # Works great!
 
-With proper deployment, your LangGraph applications become:
-- **Reliable Services**: Handle failures gracefully, maintain consistency
-- **Scalable Platforms**: Grow from 10 to 10,000 users seamlessly
-- **Maintainable Systems**: Update, monitor, and debug without downtime
-- **Cost-Efficient**: Use resources optimally, scale dynamically
-- **Production-Ready**: Secure, monitored, and professionally operated
+# Tuesday: First production issue
+# Error: Connection pool exhausted (too many concurrent users)
+# Error: 409 Conflict (users double-texting)
+# Error: Memory usage 8GB and climbing
+# Error: No way to update prompts without redeployment
+```
+
+**With Proper Deployment:**
+```python
+# Handles 10,000+ concurrent users
+# Gracefully manages double-texting
+# Updates configuration without downtime
+# Monitors health and auto-recovers from failures
+# Scales resources based on demand
+```
+
+Production deployment determines whether your AI application:
+- **Delights Users**: Fast, reliable, always available
+- **Scales Sustainably**: Grows from 10 to 10,000 users smoothly
+- **Operates Efficiently**: Optimizes costs while maintaining quality
+- **Evolves Safely**: Updates without breaking existing functionality
+- **Maintains Trust**: Secure, monitored, professionally operated
 
 ## How It Works
 
-### Core Concepts
+### The LangGraph Platform Stack
 
-#### 1. **LangGraph Platform Architecture**
+#### Architecture Overview
 
-LangGraph's deployment architecture is built on a foundation of battle-tested technologies, carefully orchestrated to provide reliability, scalability, and maintainability. Understanding this architecture is crucial for successful deployments.
+LangGraph's production architecture consists of three core components working in harmony:
 
-At the heart of the system is the **LangGraph Server**, an HTTP and WebSocket server that packages your graphs into a production-ready API. This server doesn't work alone - it's supported by two critical components:
+```
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│                 │     │                 │     │                 │
+│  LangGraph API  │────▶│     Redis       │────▶│   PostgreSQL    │
+│    (Server)     │     │  (Message Bus)  │     │    (State)      │
+│                 │     │                 │     │                 │
+└─────────────────┘     └─────────────────┘     └─────────────────┘
+        │                        │                        │
+        ▼                        ▼                        ▼
+   HTTP/WebSocket          Pub/Sub, Queues          Checkpoints,
+   API Endpoints           Streaming Data            Threads, Store
+```
 
-**Redis** serves as the high-performance message broker, handling all asynchronous communication between components. When you stream tokens from an LLM, trigger background runs, or coordinate between multiple workers, Redis ensures messages flow efficiently. Its pub/sub capabilities enable real-time streaming while its queue structures support reliable task distribution.
+**LangGraph Server** provides the API layer:
+- **What**: HTTP and WebSocket server exposing your graphs
+- **Why**: Standardized interface for any client to interact with your agents
+- **How**: Handles request routing, authentication, streaming, and protocol translation
 
-**PostgreSQL** provides durable state storage, maintaining conversation history, checkpoints, configuration, and long-term memory. Every message, every state transition, and every piece of user data is safely persisted here. PostgreSQL's ACID guarantees ensure your data remains consistent even under heavy load or system failures.
+**Redis** enables real-time communication:
+- **What**: In-memory data structure store used as message broker
+- **Why**: Enables streaming, background tasks, and inter-process communication
+- **How**: Pub/sub for streaming tokens, queues for task distribution
 
-The beauty of this architecture is its flexibility. You can deploy it as:
-- **LangGraph Cloud**: Fully managed service where LangChain handles all infrastructure
-- **LangGraph Studio**: Local development environment for testing and debugging  
-- **Self-Hosted**: Your own infrastructure using Docker, Kubernetes, or cloud services
+**PostgreSQL** provides durable storage:
+- **What**: Relational database storing all persistent state
+- **Why**: ACID guarantees for checkpoints, threads, and memory
+- **How**: Optimized schema for time-series checkpoints and hierarchical data
 
-#### 2. **Deployment Primitives**
+### Core Deployment Concepts
 
-LangGraph introduces several key primitives that form the building blocks of deployed applications:
+#### 1. Runs, Threads, and Assistants
 
-**Runs** are single atomic executions of your graph. Each run has a unique ID, processes specific input, and produces output. Runs can be synchronous (wait for completion), asynchronous (fire-and-forget), or streaming (real-time updates). Think of runs as individual function calls to your AI system.
-
-**Threads** represent ongoing conversations or sessions. Unlike runs which are one-shot, threads maintain state across multiple interactions. Each thread has its own checkpoint history, allowing users to have persistent, contextual conversations. Threads are isolated - one user's conversation never affects another's.
-
-**Assistants** are configured versions of your graphs. They separate configuration from code, allowing you to experiment with different prompts, parameters, or behaviors without changing your graph implementation. Assistants support versioning, so you can test new behaviors while keeping stable versions for production.
-
-**The Store** provides cross-thread memory, implementing the long-term memory systems from Module 5. While threads maintain conversation state, the Store maintains user profiles, preferences, and accumulated knowledge that persists across all interactions.
-
-#### 3. **Double-Texting: Handling Concurrent Requests**
-
-One of the most challenging aspects of production AI systems is handling "double-texting" - when users send multiple messages before receiving a response. This happens constantly in real applications: impatient users, accidental double-clicks, or genuine follow-up thoughts.
-
-LangGraph provides four strategies to handle this:
-
-**Reject** simply denies the second request with a 409 Conflict error. This is appropriate when you want to ensure users wait for responses, preventing confusion or wasted computation. It's the simplest strategy but can frustrate users who expect immediate acknowledgment.
-
-**Enqueue** queues the second request to run after the first completes. This ensures all user input is processed in order, maintaining conversation coherence. It's ideal for scenarios where every message matters and order is important, like step-by-step tutorials or workflows.
-
-**Interrupt** stops the current run, saves its progress as a checkpoint, and starts processing the new request. This mimics natural conversation where a follow-up thought takes precedence. The interrupted state is preserved, allowing potential resumption later.
-
-**Rollback** is the most aggressive strategy - it deletes the current run entirely and starts fresh with the new input. This is useful when the user's second message completely changes direction, making the first response irrelevant.
-
-#### 4. **Configuration Management**
-
-Production systems need flexible configuration that can vary by environment, user, or deployment without code changes. LangGraph's configuration system provides multiple layers of customization:
-
-**Graph-Level Configuration** defines the structure and capabilities of your agent - what tools it has access to, how state is managed, and core behavioral parameters. This is typically static and defined in code.
-
-**Assistant Configuration** adds a layer of runtime customization. You might have different assistants for different user tiers, departments, or use cases, all running the same underlying graph but with different prompts, parameters, or restrictions.
-
-**User Configuration** provides per-user customization through the Configuration dataclass pattern. This allows passing user IDs, preferences, feature flags, or any other user-specific data into your graph execution.
-
-**Environment Configuration** handles deployment-specific settings like API keys, database connections, and service endpoints. These are typically managed through environment variables and deployment manifests.
-
-#### 5. **Production Infrastructure**
-
-Deploying LangGraph applications requires careful consideration of infrastructure components and their interactions:
-
-**Container Architecture** packages your application into Docker images that include your code, dependencies, and runtime environment. This ensures consistency across development, staging, and production environments. The standard deployment includes three containers: the API server, Redis, and PostgreSQL.
-
-**Service Orchestration** coordinates these containers using Docker Compose for simple deployments or Kubernetes for complex, scalable systems. Orchestration handles service discovery, health checking, restart policies, and resource allocation.
-
-**Load Balancing** distributes requests across multiple API server instances, ensuring no single server becomes a bottleneck. This can be handled by cloud load balancers, Kubernetes services, or dedicated proxies like nginx.
-
-**Monitoring and Observability** provides visibility into system health and performance. LangSmith integration enables tracing every LLM call, graph execution, and state transition. Metrics, logs, and traces help identify issues before they impact users.
-
-### Python Patterns
-
-#### Building a Production-Ready Graph
-
-Let's build a complete production deployment, starting with a sophisticated graph that demonstrates key patterns:
+Understanding these primitives is crucial for production deployments:
 
 ```python
-# task_maistro.py - Production graph implementation
-from typing import TypedDict, Annotated, Literal
-from datetime import datetime
-from dataclasses import dataclass
-from langgraph.graph import StateGraph, START, END
-from langgraph.prebuilt import ToolNode
-from langgraph.store.memory import BaseStore
-from langchain_core.messages import HumanMessage, AIMessage
-import logging
-
-# Configure logging for production
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+# Run: Single execution of your graph
+run = await client.runs.create(
+    thread_id="thread-123",     # Conversation context
+    assistant_id="assistant-v2", # Configuration version
+    input={"messages": [msg]},   # Input data
+    config={                     # Runtime configuration
+        "configurable": {
+            "user_id": "user-456",
+            "model": "gpt-4"
+        }
+    }
 )
-logger = logging.getLogger(__name__)
 
-# Configuration with validation and defaults
-@dataclass
-class Configuration:
-    """Production configuration with validation"""
-    user_id: str = "default-user"
-    assistant_role: str = "helpful"
-    max_tokens: int = 2000
-    temperature: float = 0.7
-    enable_memory: bool = True
-    enable_tools: bool = True
-    allowed_tools: list[str] = None
-    
-    def __post_init__(self):
-        # Validate configuration
-        if self.temperature < 0 or self.temperature > 2:
-            raise ValueError(f"Invalid temperature: {self.temperature}")
-        if self.max_tokens < 100 or self.max_tokens > 10000:
-            raise ValueError(f"Invalid max_tokens: {self.max_tokens}")
-        if self.allowed_tools is None:
-            self.allowed_tools = ["search", "calculator", "weather"]
-    
-    @classmethod
-    def from_runnable_config(cls, config: dict) -> "Configuration":
-        """Create configuration from runtime config"""
-        configurable = config.get("configurable", {})
-        return cls(
-            user_id=configurable.get("user_id", "default-user"),
-            assistant_role=configurable.get("assistant_role", "helpful"),
-            max_tokens=configurable.get("max_tokens", 2000),
-            temperature=configurable.get("temperature", 0.7),
-            enable_memory=configurable.get("enable_memory", True),
-            enable_tools=configurable.get("enable_tools", True),
-            allowed_tools=configurable.get("allowed_tools")
-        )
-
-# State with production considerations
-class State(TypedDict):
-    messages: Annotated[list, lambda x, y: x + y]
-    user_id: str
-    error: str | None
-    metadata: dict
-    
-class PrivateState(State):
-    """Internal state with sensitive data"""
-    memory_context: dict
-    tool_calls: list
-    processing_time: float
-
-# Production error handling
-def error_handler(func):
-    """Decorator for consistent error handling"""
-    def wrapper(state: State, config: dict = None):
-        try:
-            start_time = datetime.utcnow()
-            result = func(state, config)
-            
-            # Track processing time
-            if hasattr(state, 'processing_time'):
-                state['processing_time'] = (
-                    datetime.utcnow() - start_time
-                ).total_seconds()
-            
-            return result
-            
-        except Exception as e:
-            logger.error(f"Error in {func.__name__}: {str(e)}", exc_info=True)
-            state["error"] = f"Processing error: {str(e)}"
-            return state
-    
-    return wrapper
-
-# Memory integration
-class MemoryManager:
-    """Production memory management"""
-    
-    def __init__(self, store: BaseStore):
-        self.store = store
-        
-    def get_user_context(self, user_id: str) -> dict:
-        """Retrieve user context with caching"""
-        try:
-            # Get user profile
-            profile_ns = (user_id, "profile")
-            profile_data = self.store.get(profile_ns, "main")
-            
-            # Get recent interactions
-            interactions_ns = (user_id, "interactions")
-            recent = self.store.search(interactions_ns, limit=5)
-            
-            return {
-                "profile": profile_data.value if profile_data else {},
-                "recent_interactions": [r.value for r in recent],
-                "last_seen": datetime.utcnow().isoformat()
-            }
-        except Exception as e:
-            logger.error(f"Memory retrieval error: {e}")
-            return {"profile": {}, "recent_interactions": []}
-    
-    def save_interaction(self, user_id: str, messages: list, response: str):
-        """Save interaction for future context"""
-        try:
-            ns = (user_id, "interactions")
-            key = datetime.utcnow().isoformat()
-            
-            self.store.put(ns, key, {
-                "timestamp": key,
-                "message_count": len(messages),
-                "last_human_message": messages[-1].content if messages else "",
-                "assistant_response": response[:500],  # Truncate for storage
-                "metadata": {
-                    "model": "gpt-4",
-                    "temperature": 0.7
-                }
-            })
-        except Exception as e:
-            logger.error(f"Memory save error: {e}")
-
-# Graph nodes with production features
-@error_handler
-def process_input(state: PrivateState, config: dict) -> PrivateState:
-    """Process and validate input"""
-    conf = Configuration.from_runnable_config(config)
-    
-    # Validate message content
-    if not state["messages"]:
-        state["error"] = "No messages provided"
-        return state
-    
-    last_message = state["messages"][-1]
-    if not isinstance(last_message, HumanMessage):
-        state["error"] = "Expected human message"
-        return state
-    
-    # Check message length
-    if len(last_message.content) > 10000:
-        state["error"] = "Message too long (max 10000 characters)"
-        return state
-    
-    # Add metadata
-    state["metadata"] = {
-        "user_id": conf.user_id,
-        "timestamp": datetime.utcnow().isoformat(),
-        "message_length": len(last_message.content)
+# Thread: Persistent conversation
+thread = await client.threads.create(
+    metadata={
+        "user_id": "user-456",
+        "channel": "web",
+        "created_at": datetime.utcnow().isoformat()
     }
-    
-    logger.info(f"Processing input from user {conf.user_id}")
-    return state
+)
 
-@error_handler
-def enrich_with_memory(state: PrivateState, config: dict, memory_manager: MemoryManager) -> PrivateState:
-    """Add memory context to state"""
-    conf = Configuration.from_runnable_config(config)
-    
-    if not conf.enable_memory:
-        state["memory_context"] = {}
-        return state
-    
-    # Get user context
-    context = memory_manager.get_user_context(conf.user_id)
-    state["memory_context"] = context
-    
-    logger.info(f"Enriched with {len(context['recent_interactions'])} recent interactions")
-    return state
-
-@error_handler
-def generate_response(state: PrivateState, config: dict, llm) -> PrivateState:
-    """Generate AI response with full context"""
-    conf = Configuration.from_runnable_config(config)
-    
-    # Build system prompt with configuration
-    system_prompt = f"""You are a {conf.assistant_role} AI assistant.
-    
-User Profile: {state.get('memory_context', {}).get('profile', {})}
-Recent Context: {len(state.get('memory_context', {}).get('recent_interactions', []))} previous interactions
-
-Guidelines:
-- Respond in a {conf.assistant_role} manner
-- Keep responses under {conf.max_tokens} tokens
-- Use available tools when helpful: {conf.allowed_tools if conf.enable_tools else 'No tools available'}
-"""
-    
-    # Generate response
-    messages = [
-        {"role": "system", "content": system_prompt},
-        *state["messages"]
-    ]
-    
-    response = llm.invoke(
-        messages,
-        temperature=conf.temperature,
-        max_tokens=conf.max_tokens
-    )
-    
-    state["messages"].append(response)
-    logger.info(f"Generated response with {len(response.content)} characters")
-    
-    return state
-
-@error_handler
-def save_interaction_node(state: PrivateState, config: dict, memory_manager: MemoryManager) -> State:
-    """Save interaction and prepare final state"""
-    conf = Configuration.from_runnable_config(config)
-    
-    if conf.enable_memory and len(state["messages"]) >= 2:
-        # Save the interaction
-        last_ai_message = state["messages"][-1]
-        memory_manager.save_interaction(
-            conf.user_id,
-            state["messages"][:-1],
-            last_ai_message.content
-        )
-    
-    # Clean private state for output
-    public_state = {
-        "messages": state["messages"],
-        "user_id": state["user_id"],
-        "error": state.get("error"),
-        "metadata": state["metadata"]
-    }
-    
-    return public_state
-
-# Build production graph
-def create_graph(llm, tools: list, store: BaseStore):
-    """Create production-ready graph"""
-    memory_manager = MemoryManager(store)
-    
-    # Create graph with private state
-    builder = StateGraph(PrivateState, output=State)
-    
-    # Add nodes with dependency injection
-    builder.add_node(
-        "process_input",
-        lambda s, c: process_input(s, c)
-    )
-    builder.add_node(
-        "enrich_memory",
-        lambda s, c: enrich_with_memory(s, c, memory_manager)
-    )
-    builder.add_node(
-        "generate",
-        lambda s, c: generate_response(s, c, llm)
-    )
-    builder.add_node(
-        "save_interaction",
-        lambda s, c: save_interaction_node(s, c, memory_manager)
-    )
-    
-    # Tool node with filtering
-    if tools:
-        filtered_tools = ToolNode(tools)
-        builder.add_node("tools", filtered_tools)
-    
-    # Build flow with error handling
-    builder.add_edge(START, "process_input")
-    
-    # Check for input errors
-    builder.add_conditional_edges(
-        "process_input",
-        lambda s: "end" if s.get("error") else "continue",
-        {
-            "end": END,
-            "continue": "enrich_memory"
+# Assistant: Configured graph version
+assistant = await client.assistants.create(
+    graph_id="my_graph",
+    config={
+        "configurable": {
+            "system_prompt": "You are a helpful assistant",
+            "temperature": 0.7,
+            "tools": ["search", "calculator"]
         }
-    )
-    
-    builder.add_edge("enrich_memory", "generate")
-    
-    # Tool routing
-    if tools:
-        builder.add_conditional_edges(
-            "generate",
-            lambda s: "tools" if s["messages"][-1].tool_calls else "save",
-            {
-                "tools": "tools",
-                "save": "save_interaction"
-            }
-        )
-        builder.add_edge("tools", "generate")
-    else:
-        builder.add_edge("generate", "save_interaction")
-    
-    builder.add_edge("save_interaction", END)
-    
-    return builder.compile()
-
-# Export for deployment
-graph = None  # Will be initialized by deployment infrastructure
-
-def initialize_graph(llm=None, tools=None, store=None):
-    """Initialize graph with dependencies"""
-    global graph
-    
-    # Use provided dependencies or defaults
-    if llm is None:
-        from langchain_openai import ChatOpenAI
-        llm = ChatOpenAI(model="gpt-4", temperature=0.7)
-    
-    if tools is None:
-        tools = []  # Add your tools here
-    
-    if store is None:
-        from langgraph.store.memory import InMemoryStore
-        store = InMemoryStore()
-    
-    graph = create_graph(llm, tools, store)
-    logger.info("Graph initialized successfully")
-    
-    return graph
+    },
+    metadata={"version": "2.1.0", "stage": "production"}
+)
 ```
 
-#### Configuration File for Deployment
+#### 2. Double-Texting Strategies
+
+Users don't wait. They send follow-ups, corrections, and new thoughts. Your system must handle this gracefully:
+
+**Reject Strategy**
+```python
+# Use when: You need users to wait for responses
+# Example: Payment processing, critical operations
+config = {"multitask_strategy": "reject"}
+
+# User experience:
+# User: "Book a flight to NYC"
+# System: *processing...*
+# User: "Actually, make it Boston"  
+# System: "Please wait for the current request to complete"
+```
+
+**Enqueue Strategy**
+```python
+# Use when: All messages should be processed in order
+# Example: Tutorial flows, sequential workflows
+config = {"multitask_strategy": "enqueue"}
+
+# User experience:
+# User: "Explain quantum computing"
+# System: *processing...*
+# User: "Start with the basics"
+# System: *completes first response, then processes second*
+```
+
+**Interrupt Strategy**
+```python
+# Use when: New input changes context
+# Example: Conversational AI, search refinement
+config = {"multitask_strategy": "interrupt"}
+
+# User experience:
+# User: "Find restaurants in Seattle"
+# System: *searching...*
+# User: "Only vegan restaurants"
+# System: *stops previous search, finds vegan restaurants*
+```
+
+**Rollback Strategy**
+```python
+# Use when: New input completely replaces previous
+# Example: Form corrections, query rewrites
+config = {"multitask_strategy": "rollback"}
+
+# User experience:
+# User: "My email is jon@example.com"
+# System: *processing...*
+# User: "Sorry, it's john@example.com"
+# System: *discards first input entirely, uses corrected email*
+```
+
+### Production Deployment Patterns
+
+#### Local Development with LangGraph Studio
+
+Start with local development for rapid iteration:
 
 ```python
-# configuration.py - Runtime configuration
-from dataclasses import dataclass, field
-from typing import Optional, List
-
-@dataclass
-class AssistantConfiguration:
-    """Assistant-specific configuration"""
-    name: str = "Task Maistro"
-    description: str = "A helpful AI assistant for task management"
-    version: str = "1.0.0"
-    
-    # Model configuration
-    model: str = "gpt-4"
-    temperature: float = 0.7
-    max_tokens: int = 2000
-    
-    # Feature flags
-    enable_memory: bool = True
-    enable_tools: bool = True
-    enable_web_search: bool = False
-    
-    # Behavioral configuration
-    personality: str = "professional and friendly"
-    response_style: str = "concise but thorough"
-    
-    # Tool configuration
-    allowed_tools: List[str] = field(default_factory=lambda: [
-        "search", "calculator", "weather"
-    ])
-    tool_timeout: int = 30  # seconds
-    
-    # Memory configuration
-    memory_retention_days: int = 90
-    max_memory_items: int = 1000
-    
-    # Safety configuration
-    content_filter: bool = True
-    pii_detection: bool = True
-    
-    @classmethod
-    def from_dict(cls, data: dict) -> "AssistantConfiguration":
-        """Create configuration from dictionary"""
-        return cls(**{k: v for k, v in data.items() if hasattr(cls, k)})
-    
-    def to_dict(self) -> dict:
-        """Export configuration as dictionary"""
-        return {
-            k: getattr(self, k) 
-            for k in dir(self) 
-            if not k.startswith('_') and not callable(getattr(self, k))
-        }
-
-# Deployment environments
-CONFIGURATIONS = {
-    "development": AssistantConfiguration(
-        name="Task Maistro (Dev)",
-        temperature=0.9,
-        enable_web_search=True,
-        content_filter=False
-    ),
-    "staging": AssistantConfiguration(
-        name="Task Maistro (Staging)",
-        temperature=0.7,
-        enable_web_search=True,
-        content_filter=True
-    ),
-    "production": AssistantConfiguration(
-        name="Task Maistro",
-        temperature=0.7,
-        enable_web_search=False,
-        content_filter=True,
-        pii_detection=True
-    )
-}
-
-def get_configuration(environment: str = "production") -> AssistantConfiguration:
-    """Get configuration for specific environment"""
-    return CONFIGURATIONS.get(environment, CONFIGURATIONS["production"])
-```
-
-#### Deployment Configuration
-
-```json
-// langgraph.json - Deployment manifest
+# langgraph.json - Studio configuration
 {
-  "dependencies": [".", "langchain-openai", "tavily-python"],
+  "dependencies": [".", "langchain-openai"],
   "graphs": {
-    "task_maistro": "./task_maistro:graph"
+    "my_assistant": "./graph:assistant"
   },
   "env": {
     "OPENAI_API_KEY": "${OPENAI_API_KEY}",
-    "TAVILY_API_KEY": "${TAVILY_API_KEY}",
-    "LANGSMITH_API_KEY": "${LANGSMITH_API_KEY}",
-    "ENVIRONMENT": "production"
-  },
-  "python_version": "3.11",
-  "pip_config_file": "./pip.conf",
-  "dockerfile_lines": [
-    "RUN apt-get update && apt-get install -y libpq-dev",
-    "RUN pip install --upgrade pip"
-  ]
+    "LANGCHAIN_TRACING_V2": "true"
+  }
 }
+
+# graph.py - Development graph
+from langgraph.graph import StateGraph, MessagesState
+
+def create_graph():
+    builder = StateGraph(MessagesState)
+    
+    # Development-friendly features
+    builder.add_node("agent", agent_with_debug)
+    builder.compile(debug=True)  # Extra logging
+    
+    return builder.compile()
+
+# Run locally
+# $ langraph dev  # Hot reload enabled
 ```
 
 #### Docker Deployment
 
+Containerize for consistency across environments:
+
+```dockerfile
+# Dockerfile - Production image
+FROM python:3.11-slim
+
+# Security: Run as non-root user
+RUN useradd -m -u 1000 appuser
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    postgresql-client \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Python dependencies
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Application code
+COPY --chown=appuser:appuser . .
+
+# Security: Drop privileges
+USER appuser
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+# Run with proper signal handling
+CMD ["python", "-m", "langgraph", "serve", "--host", "0.0.0.0", "--port", "8000"]
+```
+
 ```yaml
-# docker-compose.yml - Production deployment
+# docker-compose.yml - Full stack deployment
 version: '3.8'
 
 services:
-  langgraph-redis:
-    image: redis:7-alpine
-    restart: unless-stopped
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-    command: >
-      redis-server
-      --appendonly yes
-      --appendfsync everysec
-      --maxmemory 512mb
-      --maxmemory-policy allkeys-lru
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
-
-  langgraph-postgres:
-    image: postgres:16-alpine
-    restart: unless-stopped
-    environment:
-      POSTGRES_DB: langgraph
-      POSTGRES_USER: langgraph
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-langgraph123}
-      PGDATA: /var/lib/postgresql/data/pgdata
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U langgraph"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    command: >
-      postgres
-      -c max_connections=200
-      -c shared_buffers=256MB
-      -c effective_cache_size=1GB
-      -c maintenance_work_mem=64MB
-      -c checkpoint_completion_target=0.9
-      -c wal_buffers=16MB
-      -c default_statistics_target=100
-      -c random_page_cost=1.1
-      -c effective_io_concurrency=200
-
   langgraph-api:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    restart: unless-stopped
+    build: .
     ports:
-      - "8123:8000"
-    depends_on:
-      langgraph-redis:
-        condition: service_healthy
-      langgraph-postgres:
-        condition: service_healthy
+      - "8000:8000"
     environment:
-      # Database configuration
-      POSTGRES_URI: postgresql://langgraph:${POSTGRES_PASSWORD:-langgraph123}@langgraph-postgres:5432/langgraph
-      REDIS_URI: redis://langgraph-redis:6379
+      # Connection strings
+      DATABASE_URL: postgresql://postgres:password@db:5432/langgraph
+      REDIS_URL: redis://redis:6379
       
-      # API configuration
-      LANGSERVE_AUTH_SECRET: ${LANGSERVE_AUTH_SECRET}
-      JWT_SECRET: ${JWT_SECRET}
-      
-      # LangChain configuration
-      LANGCHAIN_TRACING_V2: "true"
-      LANGCHAIN_API_KEY: ${LANGSMITH_API_KEY}
-      LANGCHAIN_PROJECT: "task-maistro-production"
-      
-      # Model configuration
-      OPENAI_API_KEY: ${OPENAI_API_KEY}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
-      
-      # Application configuration
+      # Configuration
       ENVIRONMENT: production
       LOG_LEVEL: INFO
-      WORKERS: 4
       
-    volumes:
-      - ./logs:/app/logs
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
+      # Secrets (use Docker secrets in production)
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      LANGCHAIN_API_KEY: ${LANGCHAIN_API_KEY}
+      
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    
+    # Resource limits
     deploy:
       resources:
         limits:
@@ -642,648 +289,985 @@ services:
         reservations:
           cpus: '1'
           memory: 2G
-
-  # Optional: Nginx reverse proxy for production
+    
+    # Scaling
+    scale: 3  # Run 3 instances
+    
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: langgraph
+      POSTGRES_PASSWORD: password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      
+  # Load balancer
   nginx:
     image: nginx:alpine
-    restart: unless-stopped
     ports:
       - "80:80"
-      - "443:443"
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./ssl:/etc/nginx/ssl:ro
     depends_on:
       - langgraph-api
-    healthcheck:
-      test: ["CMD", "wget", "--spider", "http://localhost/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
 
 volumes:
   postgres_data:
-    driver: local
   redis_data:
-    driver: local
+```
 
-networks:
-  default:
-    name: langgraph-network
-    driver: bridge
+#### Kubernetes Deployment
+
+Scale to handle enterprise workloads:
+
+```yaml
+# deployment.yaml - Kubernetes manifest
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: langgraph-api
+  labels:
+    app: langgraph
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: langgraph
+  template:
+    metadata:
+      labels:
+        app: langgraph
+    spec:
+      containers:
+      - name: api
+        image: myregistry/langgraph:v1.0.0
+        ports:
+        - containerPort: 8000
+        
+        # Resource management
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "1000m"
+          limits:
+            memory: "4Gi"
+            cpu: "2000m"
+        
+        # Health checks
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        
+        # Environment from ConfigMap and Secrets
+        envFrom:
+        - configMapRef:
+            name: langgraph-config
+        - secretRef:
+            name: langgraph-secrets
+            
+        # Volume mounts
+        volumeMounts:
+        - name: config
+          mountPath: /app/config
+          readOnly: true
+          
+      volumes:
+      - name: config
+        configMap:
+          name: langgraph-app-config
+
+---
+# Horizontal Pod Autoscaler
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: langgraph-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: langgraph-api
+  minReplicas: 3
+  maxReplicas: 20
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+```
+
+### Production Code Patterns
+
+#### Building a Production Graph
+
+```python
+# production_graph.py
+import logging
+import time
+from typing import TypedDict, Annotated, Optional
+from datetime import datetime
+from dataclasses import dataclass
+
+from langgraph.graph import StateGraph, START, END
+from langgraph.checkpoint.postgres import PostgresSaver
+from langgraph.store.postgres import PostgresStore
+from langchain_core.messages import BaseMessage
+from langchain_core.runnables import RunnableConfig
+
+# Structured logging
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+# Metrics collection
+from prometheus_client import Counter, Histogram, Gauge
+
+request_counter = Counter('langgraph_requests_total', 'Total requests')
+request_duration = Histogram('langgraph_request_duration_seconds', 'Request duration')
+active_threads = Gauge('langgraph_active_threads', 'Number of active threads')
+error_counter = Counter('langgraph_errors_total', 'Total errors', ['error_type'])
+
+# Production state with monitoring
+class ProductionState(TypedDict):
+    messages: Annotated[list[BaseMessage], lambda x, y: x + y]
+    user_id: str
+    thread_id: str
+    
+    # Monitoring fields
+    start_time: float
+    end_time: Optional[float]
+    tokens_used: int
+    error: Optional[str]
+    
+    # Feature flags
+    enable_tools: bool
+    enable_web_search: bool
+    
+    # Security
+    rate_limit_remaining: int
+    content_filtered: bool
+
+# Error handling decorator
+def with_error_handling(node_name: str):
+    def decorator(func):
+        async def wrapper(state: ProductionState, config: RunnableConfig):
+            try:
+                # Track metrics
+                start = time.time()
+                request_counter.inc()
+                
+                # Execute node
+                result = await func(state, config)
+                
+                # Record success metrics
+                duration = time.time() - start
+                request_duration.observe(duration)
+                logger.info(f"{node_name} completed in {duration:.2f}s")
+                
+                return result
+                
+            except Exception as e:
+                # Record error metrics
+                error_counter.labels(error_type=type(e).__name__).inc()
+                logger.error(f"Error in {node_name}: {str(e)}", exc_info=True)
+                
+                # Update state with error
+                state["error"] = f"{node_name} failed: {str(e)}"
+                
+                # Decide whether to continue or abort
+                if isinstance(e, CriticalError):
+                    raise  # Abort execution
+                    
+                return state  # Continue with error in state
+                
+        return wrapper
+    return decorator
+
+# Rate limiting
+class RateLimiter:
+    def __init__(self, requests_per_minute: int = 60):
+        self.requests_per_minute = requests_per_minute
+        self.user_windows = {}  # user_id -> list of timestamps
+        
+    async def check_rate_limit(self, user_id: str) -> tuple[bool, int]:
+        """Check if user is within rate limit"""
+        now = time.time()
+        window_start = now - 60  # 1 minute window
+        
+        # Get user's request timestamps
+        if user_id not in self.user_windows:
+            self.user_windows[user_id] = []
+            
+        # Remove old timestamps
+        self.user_windows[user_id] = [
+            ts for ts in self.user_windows[user_id] 
+            if ts > window_start
+        ]
+        
+        # Check limit
+        request_count = len(self.user_windows[user_id])
+        if request_count >= self.requests_per_minute:
+            return False, 0
+            
+        # Add current request
+        self.user_windows[user_id].append(now)
+        remaining = self.requests_per_minute - request_count - 1
+        
+        return True, remaining
+
+# Content filtering
+class ContentFilter:
+    def __init__(self):
+        self.blocked_terms = set()  # Load from config
+        self.pii_patterns = []      # Regex patterns for PII
+        
+    async def filter_content(self, content: str) -> tuple[str, bool]:
+        """Filter sensitive content"""
+        filtered = False
+        
+        # Check blocked terms
+        for term in self.blocked_terms:
+            if term.lower() in content.lower():
+                content = content.replace(term, "[FILTERED]")
+                filtered = True
+                
+        # Check PII patterns
+        for pattern in self.pii_patterns:
+            if pattern.search(content):
+                content = pattern.sub("[PII_REMOVED]", content)
+                filtered = True
+                
+        return content, filtered
+
+# Production nodes
+rate_limiter = RateLimiter()
+content_filter = ContentFilter()
+
+@with_error_handling("rate_limit_check")
+async def check_rate_limit(state: ProductionState, config: RunnableConfig):
+    """Check and enforce rate limits"""
+    user_id = state["user_id"]
+    
+    allowed, remaining = await rate_limiter.check_rate_limit(user_id)
+    
+    if not allowed:
+        state["error"] = "Rate limit exceeded. Please try again later."
+        logger.warning(f"Rate limit exceeded for user {user_id}")
+    
+    state["rate_limit_remaining"] = remaining
+    return state
+
+@with_error_handling("content_moderation")  
+async def moderate_content(state: ProductionState, config: RunnableConfig):
+    """Filter sensitive content from messages"""
+    messages = state["messages"]
+    if not messages:
+        return state
+        
+    last_message = messages[-1]
+    filtered_content, was_filtered = await content_filter.filter_content(
+        last_message.content
+    )
+    
+    if was_filtered:
+        # Replace message with filtered version
+        last_message.content = filtered_content
+        state["content_filtered"] = True
+        logger.info(f"Content filtered for user {state['user_id']}")
+        
+    return state
+
+@with_error_handling("process_message")
+async def process_message(state: ProductionState, config: RunnableConfig):
+    """Main processing logic with all production features"""
+    # Track active threads
+    active_threads.inc()
+    
+    try:
+        # Get configuration
+        configurable = config.get("configurable", {})
+        
+        # Process based on feature flags
+        if state.get("enable_tools") and not state.get("error"):
+            # Tool processing logic
+            pass
+            
+        if state.get("enable_web_search") and not state.get("error"):
+            # Web search logic
+            pass
+            
+        # Generate response
+        # ... your LLM logic here ...
+        
+        # Track token usage
+        state["tokens_used"] = calculate_tokens(state["messages"])
+        
+    finally:
+        # Always decrement active threads
+        active_threads.dec()
+        
+    return state
+
+# Build production graph
+def create_production_graph(checkpointer: PostgresSaver, store: PostgresStore):
+    """Create graph with all production features"""
+    
+    builder = StateGraph(ProductionState)
+    
+    # Add nodes in sequence
+    builder.add_node("rate_limit", check_rate_limit)
+    builder.add_node("content_filter", moderate_content)
+    builder.add_node("process", process_message)
+    
+    # Define flow
+    builder.add_edge(START, "rate_limit")
+    
+    # Conditional routing based on rate limit
+    builder.add_conditional_edges(
+        "rate_limit",
+        lambda s: "end" if s.get("error") else "continue",
+        {
+            "end": END,
+            "continue": "content_filter"
+        }
+    )
+    
+    builder.add_edge("content_filter", "process")
+    builder.add_edge("process", END)
+    
+    # Compile with production features
+    return builder.compile(
+        checkpointer=checkpointer,
+        store=store,
+        interrupt_before=[],  # No interruptions in production
+        debug=False          # Disable debug logging
+    )
+
+# Health check endpoint
+async def health_check(graph, db_pool, redis_client):
+    """Comprehensive health check"""
+    health = {
+        "status": "healthy",
+        "timestamp": datetime.utcnow().isoformat(),
+        "checks": {}
+    }
+    
+    # Check graph
+    try:
+        # Simple graph test
+        test_state = {
+            "messages": [],
+            "user_id": "health-check",
+            "thread_id": "health-check",
+            "start_time": time.time(),
+            "enable_tools": False,
+            "enable_web_search": False,
+            "rate_limit_remaining": 100,
+            "content_filtered": False,
+            "tokens_used": 0
+        }
+        await graph.ainvoke(test_state, {"configurable": {"thread_id": "health-check"}})
+        health["checks"]["graph"] = "healthy"
+    except Exception as e:
+        health["checks"]["graph"] = f"unhealthy: {str(e)}"
+        health["status"] = "unhealthy"
+        
+    # Check database
+    try:
+        async with db_pool.acquire() as conn:
+            await conn.fetchval("SELECT 1")
+        health["checks"]["database"] = "healthy"
+    except Exception as e:
+        health["checks"]["database"] = f"unhealthy: {str(e)}"
+        health["status"] = "unhealthy"
+        
+    # Check Redis
+    try:
+        await redis_client.ping()
+        health["checks"]["redis"] = "healthy"
+    except Exception as e:
+        health["checks"]["redis"] = f"unhealthy: {str(e)}"
+        health["status"] = "unhealthy"
+        
+    # Check memory
+    import psutil
+    memory = psutil.virtual_memory()
+    health["checks"]["memory"] = {
+        "used_percent": memory.percent,
+        "available_gb": memory.available / (1024**3)
+    }
+    if memory.percent > 90:
+        health["status"] = "degraded"
+        
+    return health
 ```
 
 #### Production Client Implementation
 
 ```python
-# client.py - Production client with error handling
+# production_client.py
 import asyncio
 import logging
-from typing import Optional, AsyncIterator, Dict, Any
+from typing import Optional, Dict, Any, AsyncIterator
+from datetime import datetime
+import backoff
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
+
 from langgraph_sdk import get_client
 from langgraph_sdk.client import LangGraphClient
-import backoff
 
 logger = logging.getLogger(__name__)
 
-class ProductionClient:
-    """Production-ready LangGraph client with retries and monitoring"""
+class ProductionLangGraphClient:
+    """Production-ready client with all enterprise features"""
     
     def __init__(
         self,
         url: str,
         api_key: Optional[str] = None,
-        timeout: int = 60,
-        max_retries: int = 3
+        timeout: int = 30,
+        max_retries: int = 3,
+        circuit_breaker_threshold: int = 5
     ):
         self.url = url
         self.api_key = api_key
         self.timeout = timeout
         self.max_retries = max_retries
-        self._client: Optional[LangGraphClient] = None
+        
+        # Circuit breaker
+        self.failure_count = 0
+        self.circuit_breaker_threshold = circuit_breaker_threshold
+        self.circuit_open = False
+        self.circuit_open_until = None
+        
+        # Connection pool
+        self._client = None
         
     @asynccontextmanager
     async def get_client(self) -> LangGraphClient:
-        """Get client with connection management"""
-        if self._client is None:
-            self._client = get_client(
-                url=self.url,
-                api_key=self.api_key
-            )
-        
+        """Get client with circuit breaker"""
+        # Check circuit breaker
+        if self.circuit_open:
+            if datetime.utcnow() < self.circuit_open_until:
+                raise Exception("Circuit breaker is open")
+            else:
+                # Try to close circuit
+                self.circuit_open = False
+                self.failure_count = 0
+                
         try:
+            if self._client is None:
+                self._client = get_client(url=self.url, api_key=self.api_key)
             yield self._client
+            
+            # Reset failure count on success
+            self.failure_count = 0
+            
         except Exception as e:
-            logger.error(f"Client error: {e}")
+            # Increment failure count
+            self.failure_count += 1
+            
+            # Open circuit if threshold reached
+            if self.failure_count >= self.circuit_breaker_threshold:
+                self.circuit_open = True
+                self.circuit_open_until = datetime.utcnow() + timedelta(minutes=5)
+                logger.error(f"Circuit breaker opened due to {self.failure_count} failures")
+                
             raise
     
     @backoff.on_exception(
         backoff.expo,
         Exception,
         max_tries=3,
-        max_time=30
+        max_time=30,
+        on_backoff=lambda details: logger.warning(
+            f"Retry attempt {details['tries']} after {details['wait']}s"
+        )
     )
-    async def create_thread(self, metadata: Dict[str, Any] = None) -> str:
-        """Create thread with retry logic"""
-        async with self.get_client() as client:
-            thread = await client.threads.create(
-                metadata=metadata or {
-                    "created_at": datetime.utcnow().isoformat(),
-                    "source": "production-client"
-                }
-            )
-            logger.info(f"Created thread: {thread['thread_id']}")
-            return thread["thread_id"]
-    
-    async def run_with_timeout(
+    async def run_with_double_text_handling(
         self,
         thread_id: str,
+        assistant_id: str,
         input_data: Dict[str, Any],
-        config: Dict[str, Any] = None,
-        timeout: Optional[int] = None
+        strategy: str = "interrupt",
+        config: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
-        """Run graph with timeout and error handling"""
-        timeout = timeout or self.timeout
+        """Run with double-text handling and retries"""
         
-        try:
-            async with self.get_client() as client:
-                # Start run
-                run = await client.runs.create(
-                    thread_id=thread_id,
-                    assistant_id="task_maistro",
-                    input=input_data,
-                    config=config,
-                    metadata={
-                        "started_at": datetime.utcnow().isoformat(),
-                        "timeout": timeout
-                    }
+        # Merge double-text strategy into config
+        run_config = {
+            "multitask_strategy": strategy,
+            "configurable": {
+                "thread_id": thread_id,
+                **(config.get("configurable", {}) if config else {})
+            }
+        }
+        
+        async with self.get_client() as client:
+            try:
+                # Create run with timeout
+                run = await asyncio.wait_for(
+                    client.runs.create(
+                        thread_id=thread_id,
+                        assistant_id=assistant_id,
+                        input=input_data,
+                        config=run_config
+                    ),
+                    timeout=self.timeout
                 )
                 
-                # Wait for completion with timeout
+                # Wait for completion
                 result = await asyncio.wait_for(
                     client.runs.join(thread_id, run["run_id"]),
-                    timeout=timeout
+                    timeout=self.timeout
                 )
                 
                 return result
                 
-        except asyncio.TimeoutError:
-            logger.error(f"Run timed out after {timeout}s")
-            # Attempt to cancel the run
+            except asyncio.TimeoutError:
+                logger.error(f"Run timed out after {self.timeout}s")
+                # Attempt to cancel
+                try:
+                    await client.runs.cancel(thread_id, run["run_id"])
+                except:
+                    pass
+                raise
+                
+            except HTTPStatusError as e:
+                if e.response.status_code == 409:
+                    # Handle double-text based on strategy
+                    return await self._handle_409_error(e, strategy)
+                raise
+    
+    async def _handle_409_error(self, error, strategy: str):
+        """Handle 409 Conflict errors based on strategy"""
+        if strategy == "reject":
+            return {
+                "error": "Another request is in progress. Please wait.",
+                "status": "rejected"
+            }
+        elif strategy == "enqueue":
+            # Wait and retry
+            await asyncio.sleep(2)
+            raise  # Let backoff decorator handle retry
+        else:
+            # For interrupt/rollback, this shouldn't happen
+            # as the server should handle it
+            raise error
+    
+    async def stream_with_error_recovery(
+        self,
+        thread_id: str,
+        assistant_id: str,
+        input_data: Dict[str, Any],
+        config: Optional[Dict[str, Any]] = None
+    ) -> AsyncIterator[Any]:
+        """Stream with automatic error recovery"""
+        
+        max_reconnects = 3
+        reconnect_count = 0
+        
+        while reconnect_count < max_reconnects:
             try:
                 async with self.get_client() as client:
-                    await client.runs.cancel(thread_id, run["run_id"])
-            except:
-                pass
-            raise
-        except Exception as e:
-            logger.error(f"Run failed: {e}")
-            raise
-    
-    async def stream_run(
-        self,
-        thread_id: str,
-        input_data: Dict[str, Any],
-        config: Dict[str, Any] = None,
-        stream_mode: str = "messages-tuple"
-    ) -> AsyncIterator[Any]:
-        """Stream graph execution with error recovery"""
-        async with self.get_client() as client:
-            try:
-                async for chunk in client.runs.stream(
-                    thread_id=thread_id,
-                    assistant_id="task_maistro",
-                    input=input_data,
-                    config=config,
-                    stream_mode=stream_mode
-                ):
-                    yield chunk
+                    async for chunk in client.runs.stream(
+                        thread_id=thread_id,
+                        assistant_id=assistant_id,
+                        input=input_data,
+                        config=config,
+                        stream_mode="messages-tuple"
+                    ):
+                        yield chunk
+                        
+                # Successful completion
+                break
+                
+            except ConnectionError as e:
+                reconnect_count += 1
+                if reconnect_count >= max_reconnects:
+                    logger.error("Max reconnection attempts reached")
+                    yield {"error": "Connection lost", "type": "stream_error"}
+                    break
                     
+                # Wait before reconnecting
+                wait_time = 2 ** reconnect_count
+                logger.warning(f"Connection lost, reconnecting in {wait_time}s...")
+                await asyncio.sleep(wait_time)
+                
             except Exception as e:
                 logger.error(f"Stream error: {e}")
-                # Yield error to client
                 yield {"error": str(e), "type": "stream_error"}
-    
-    async def handle_double_text(
-        self,
-        thread_id: str,
-        input_data: Dict[str, Any],
-        strategy: str = "interrupt"
-    ) -> Dict[str, Any]:
-        """Handle double-texting with specified strategy"""
-        config = {
-            "multitask_strategy": strategy,
-            "configurable": {
-                "thread_id": thread_id
-            }
-        }
-        
-        return await self.run_with_timeout(
-            thread_id=thread_id,
-            input_data=input_data,
-            config=config
-        )
-    
-    async def get_thread_state(self, thread_id: str) -> Dict[str, Any]:
-        """Get current thread state with caching consideration"""
-        async with self.get_client() as client:
-            state = await client.threads.get_state(thread_id)
-            return state
-    
-    async def update_thread_state(
-        self,
-        thread_id: str,
-        values: Dict[str, Any]
-    ) -> None:
-        """Update thread state for human-in-the-loop"""
-        async with self.get_client() as client:
-            await client.threads.update_state(
-                thread_id=thread_id,
-                values=values,
-                as_node="human_feedback"
-            )
-    
-    async def search_memories(
-        self,
-        user_id: str,
-        query: str,
-        limit: int = 10
-    ) -> list:
-        """Search user memories"""
-        async with self.get_client() as client:
-            namespace = (user_id, "memories")
-            results = await client.store.search_items(
-                namespace=namespace,
-                query=query,
-                limit=limit
-            )
-            return results
+                break
 
 # Usage example
-async def production_example():
-    """Example production usage with full error handling"""
-    client = ProductionClient(
-        url="http://localhost:8123",
+async def main():
+    client = ProductionLangGraphClient(
+        url="https://api.mycompany.com/langgraph",
         api_key="your-api-key",
         timeout=30
     )
     
-    try:
-        # Create thread for user
-        thread_id = await client.create_thread(
-            metadata={"user_id": "user-123", "session": "web"}
-        )
-        
-        # Run with double-text handling
-        result = await client.handle_double_text(
-            thread_id=thread_id,
-            input_data={
-                "messages": [{"role": "user", "content": "Help me plan my day"}]
-            },
-            strategy="interrupt"
-        )
-        
-        # Stream follow-up
-        async for chunk in client.stream_run(
-            thread_id=thread_id,
-            input_data={
-                "messages": [{"role": "user", "content": "Add a meeting at 2pm"}]
-            }
-        ):
-            if "error" not in chunk:
-                print(chunk)
-                
-    except Exception as e:
-        logger.error(f"Production error: {e}")
-        # Handle error appropriately
+    # Create thread
+    thread = await client.runs.threads.create(
+        metadata={"user_id": "user-123"}
+    )
+    
+    # Run with double-text handling
+    result = await client.run_with_double_text_handling(
+        thread_id=thread["thread_id"],
+        assistant_id="my-assistant",
+        input_data={"messages": [{"role": "user", "content": "Hello!"}]},
+        strategy="interrupt"
+    )
+    
+    # Stream with error recovery
+    async for chunk in client.stream_with_error_recovery(
+        thread_id=thread["thread_id"],
+        assistant_id="my-assistant",
+        input_data={"messages": [{"role": "user", "content": "Tell me more"}]}
+    ):
+        if "error" not in chunk:
+            print(chunk)
 ```
 
-#### Monitoring and Health Checks
+### Common Pitfalls and Solutions
 
+#### 1. Ignoring Resource Limits
 ```python
-# monitoring.py - Production monitoring
+# ❌ WRONG - Unbounded resource usage
+async def process_all_users(user_ids):
+    # Creates thousands of concurrent operations
+    tasks = [process_user(uid) for uid in user_ids]
+    return await asyncio.gather(*tasks)  # Server crashes!
+
+# ✅ CORRECT - Bounded concurrency
+async def process_all_users_safely(user_ids, max_concurrent=10):
+    semaphore = asyncio.Semaphore(max_concurrent)
+    
+    async def process_with_limit(user_id):
+        async with semaphore:  # Limits concurrent operations
+            return await process_user(user_id)
+    
+    return await asyncio.gather(
+        *[process_with_limit(uid) for uid in user_ids]
+    )
+```
+
+#### 2. Poor Secret Management
+```python
+# ❌ WRONG - Hardcoded secrets
+OPENAI_API_KEY = "sk-abc123..."  # Exposed in code!
+DATABASE_URL = "postgresql://user:password@host/db"  # In version control!
+
+# ✅ CORRECT - Secure secret management
+import os
+from typing import Optional
+
+class SecureConfig:
+    @staticmethod
+    def get_secret(key: str, default: Optional[str] = None) -> str:
+        """Get secret from environment or secret manager"""
+        # Try environment variable
+        value = os.getenv(key)
+        if value:
+            return value
+            
+        # Try secret manager (e.g., AWS Secrets Manager)
+        try:
+            import boto3
+            client = boto3.client('secretsmanager')
+            response = client.get_secret_value(SecretId=key)
+            return response['SecretString']
+        except:
+            pass
+            
+        # Use default or raise
+        if default is not None:
+            return default
+        raise ValueError(f"Secret {key} not found")
+
+# Usage
+OPENAI_API_KEY = SecureConfig.get_secret("OPENAI_API_KEY")
+```
+
+#### 3. No Health Monitoring
+```python
+# ❌ WRONG - No visibility into system health
+async def start_server():
+    # Just start and hope for the best
+    await app.run()
+
+# ✅ CORRECT - Comprehensive health monitoring
 from fastapi import FastAPI, Response
-from prometheus_client import Counter, Histogram, Gauge, generate_latest
 import psutil
-import asyncio
-from datetime import datetime
+import aioredis
 
-# Metrics
-request_count = Counter('langgraph_requests_total', 'Total requests', ['method', 'endpoint'])
-request_duration = Histogram('langgraph_request_duration_seconds', 'Request duration')
-active_threads = Gauge('langgraph_active_threads', 'Active conversation threads')
-memory_usage = Gauge('langgraph_memory_usage_bytes', 'Memory usage in bytes')
-error_count = Counter('langgraph_errors_total', 'Total errors', ['type'])
-
-# Health check endpoint
 app = FastAPI()
 
 @app.get("/health")
-async def health_check():
-    """Comprehensive health check"""
-    try:
-        checks = {
-            "status": "healthy",
-            "timestamp": datetime.utcnow().isoformat(),
-            "checks": {}
-        }
-        
-        # Check database
-        try:
-            # Your database check here
-            checks["checks"]["database"] = "healthy"
-        except Exception as e:
-            checks["checks"]["database"] = f"unhealthy: {str(e)}"
-            checks["status"] = "degraded"
-        
-        # Check Redis
-        try:
-            # Your Redis check here
-            checks["checks"]["redis"] = "healthy"
-        except Exception as e:
-            checks["checks"]["redis"] = f"unhealthy: {str(e)}"
-            checks["status"] = "degraded"
-        
-        # Check memory usage
-        memory_percent = psutil.virtual_memory().percent
-        checks["checks"]["memory"] = f"{memory_percent}% used"
-        if memory_percent > 90:
-            checks["status"] = "degraded"
-        
-        # Check CPU
-        cpu_percent = psutil.cpu_percent(interval=1)
-        checks["checks"]["cpu"] = f"{cpu_percent}% used"
-        if cpu_percent > 90:
-            checks["status"] = "degraded"
-        
-        status_code = 200 if checks["status"] == "healthy" else 503
-        return Response(
-            content=json.dumps(checks),
-            status_code=status_code,
-            media_type="application/json"
-        )
-        
-    except Exception as e:
-        return Response(
-            content=json.dumps({
-                "status": "unhealthy",
-                "error": str(e)
-            }),
-            status_code=503,
-            media_type="application/json"
-        )
-
-@app.get("/metrics")
-async def metrics():
-    """Prometheus metrics endpoint"""
-    # Update runtime metrics
-    memory_usage.set(psutil.Process().memory_info().rss)
-    
-    return Response(
-        content=generate_latest(),
-        media_type="text/plain"
-    )
-
-# Middleware for request tracking
-@app.middleware("http")
-async def track_requests(request, call_next):
-    """Track all requests for monitoring"""
-    start_time = datetime.utcnow()
-    
-    # Track request
-    request_count.labels(
-        method=request.method,
-        endpoint=request.url.path
-    ).inc()
-    
-    try:
-        response = await call_next(request)
-        
-        # Track duration
-        duration = (datetime.utcnow() - start_time).total_seconds()
-        request_duration.observe(duration)
-        
-        return response
-        
-    except Exception as e:
-        error_count.labels(type=type(e).__name__).inc()
-        raise
-```
-
-### Common Pitfalls
-
-#### 1. **Ignoring Double-Texting Scenarios**
-
-The most common production issue is failing to handle concurrent requests properly. Users will double-text, and your system must handle it gracefully:
-
-```python
-# PROBLEMATIC - No double-text handling
-async def basic_run(client, thread_id, message):
-    # This will fail with 409 errors when users double-text
-    return await client.runs.create(
-        thread_id=thread_id,
-        input={"messages": [message]}
-    )
-
-# ROBUST - Proper double-text handling
-async def production_run(client, thread_id, message, strategy="interrupt"):
-    """Handle double-texting based on use case"""
-    config = {
-        "multitask_strategy": strategy,  # reject, enqueue, interrupt, or rollback
-        "configurable": {
-            "thread_id": thread_id,
-            "checkpoint_ns": f"conversation_{datetime.now().date()}"
-        }
+async def health():
+    """Multi-point health check"""
+    health_status = {
+        "status": "healthy",
+        "timestamp": datetime.utcnow().isoformat(),
+        "checks": {}
     }
     
+    # Check critical components
     try:
-        return await client.runs.create(
-            thread_id=thread_id,
-            input={"messages": [message]},
-            config=config
-        )
-    except HTTPStatusError as e:
-        if e.response.status_code == 409:
-            # Handle based on strategy
-            if strategy == "reject":
-                return {"error": "Please wait for current response"}
-            elif strategy == "enqueue":
-                # Retry with backoff
-                await asyncio.sleep(1)
-                return await production_run(client, thread_id, message, strategy)
-        raise
+        # Database
+        async with db_pool.acquire() as conn:
+            await conn.fetchval("SELECT 1")
+        health_status["checks"]["database"] = "ok"
+    except Exception as e:
+        health_status["checks"]["database"] = str(e)
+        health_status["status"] = "unhealthy"
+    
+    # Memory check
+    memory = psutil.virtual_memory()
+    health_status["checks"]["memory_percent"] = memory.percent
+    if memory.percent > 90:
+        health_status["status"] = "degraded"
+    
+    # Return appropriate status code
+    status_code = 200 if health_status["status"] == "healthy" else 503
+    return Response(
+        content=json.dumps(health_status),
+        status_code=status_code,
+        media_type="application/json"
+    )
+
+@app.get("/ready")
+async def readiness():
+    """Check if service is ready to accept traffic"""
+    # Check if all dependencies are initialized
+    if not (db_pool and redis_client and model_loaded):
+        return Response(status_code=503)
+    return Response(status_code=200)
 ```
 
-#### 2. **Memory Leaks in Long-Running Services**
-
-Production services run for weeks or months. Memory leaks that seem minor in development can crash production:
-
+#### 4. Missing Request Tracing
 ```python
-# MEMORY LEAK - Unbounded cache
-class BadCache:
-    def __init__(self):
-        self.cache = {}  # Never cleaned!
-    
-    def add(self, key, value):
-        self.cache[key] = value  # Grows forever
+# ❌ WRONG - No way to trace requests through system
+async def handle_request(data):
+    result = await process(data)
+    return result  # Which user? What happened? How long?
 
-# PRODUCTION-READY - Bounded cache with TTL
-from cachetools import TTLCache
-import threading
+# ✅ CORRECT - Full request tracing
+import uuid
+from contextvars import ContextVar
 
-class ProductionCache:
-    def __init__(self, maxsize=1000, ttl=3600):
-        self.cache = TTLCache(maxsize=maxsize, ttl=ttl)
-        self.lock = threading.Lock()
+# Request context
+request_id_var: ContextVar[str] = ContextVar('request_id')
+
+class TracedHandler:
+    async def handle_request(self, data: dict, user_id: str):
+        # Generate request ID
+        request_id = str(uuid.uuid4())
+        request_id_var.set(request_id)
         
-    def add(self, key, value):
-        with self.lock:
-            self.cache[key] = value
-    
-    def get(self, key, default=None):
-        with self.lock:
-            return self.cache.get(key, default)
-    
-    def cleanup(self):
-        """Periodic cleanup of expired items"""
-        with self.lock:
-            # TTLCache handles this automatically
-            self.cache.expire()
-```
-
-#### 3. **Poor Error Recovery**
-
-Production systems face network issues, service outages, and unexpected errors. Poor error handling leads to cascading failures:
-
-```python
-# FRAGILE - No error recovery
-async def fragile_operation(client, data):
-    response = await client.process(data)  # Fails on any error
-    return response
-
-# RESILIENT - Comprehensive error handling
-async def resilient_operation(client, data, max_retries=3):
-    """Production operation with full error recovery"""
-    last_error = None
-    
-    for attempt in range(max_retries):
+        # Structured logging with context
+        logger.info(
+            "Request started",
+            extra={
+                "request_id": request_id,
+                "user_id": user_id,
+                "timestamp": datetime.utcnow().isoformat()
+            }
+        )
+        
         try:
-            # Exponential backoff
-            if attempt > 0:
-                await asyncio.sleep(2 ** attempt)
+            # Time the operation
+            start = time.time()
             
-            # Attempt operation
-            response = await client.process(data)
+            # Process with tracing
+            result = await self.process_with_tracing(data)
             
-            # Validate response
-            if not response or "error" in response:
-                raise ValueError(f"Invalid response: {response}")
+            # Log completion
+            duration = time.time() - start
+            logger.info(
+                "Request completed",
+                extra={
+                    "request_id": request_id,
+                    "user_id": user_id,
+                    "duration_seconds": duration,
+                    "status": "success"
+                }
+            )
             
-            return response
-            
-        except asyncio.TimeoutError:
-            last_error = "Operation timed out"
-            logger.warning(f"Timeout on attempt {attempt + 1}")
-            continue
-            
-        except NetworkError as e:
-            last_error = f"Network error: {e}"
-            logger.warning(f"Network error on attempt {attempt + 1}: {e}")
-            continue
+            return result
             
         except Exception as e:
-            last_error = f"Unexpected error: {e}"
-            logger.error(f"Unexpected error on attempt {attempt + 1}", exc_info=True)
-            
-            # Don't retry on certain errors
-            if "rate limit" in str(e).lower():
-                raise
-            continue
-    
-    # All retries failed
-    raise OperationFailedError(
-        f"Operation failed after {max_retries} attempts. Last error: {last_error}"
-    )
+            logger.error(
+                "Request failed",
+                extra={
+                    "request_id": request_id,
+                    "user_id": user_id,
+                    "error": str(e),
+                    "error_type": type(e).__name__
+                },
+                exc_info=True
+            )
+            raise
 ```
 
-#### 4. **Configuration Drift**
-
-Different environments (dev, staging, prod) with inconsistent configurations cause mysterious production issues:
-
+#### 5. No Graceful Shutdown
 ```python
-# RISKY - Hardcoded configuration
-class HardcodedService:
+# ❌ WRONG - Abrupt shutdown loses in-flight requests
+def shutdown_handler(signum, frame):
+    print("Shutting down...")
+    sys.exit(0)  # Kills everything immediately!
+
+# ✅ CORRECT - Graceful shutdown
+import signal
+import asyncio
+
+class GracefulShutdown:
     def __init__(self):
-        self.api_key = "sk-abc123"  # Works in dev, fails in prod
-        self.timeout = 10  # Too short for production load
-        self.model = "gpt-3.5-turbo"  # Different behavior
-
-# MANAGED - Environment-aware configuration
-import os
-from dataclasses import dataclass
-from typing import Optional
-
-@dataclass
-class ServiceConfig:
-    """Configuration with validation and defaults"""
-    api_key: str
-    timeout: int = 30
-    model: str = "gpt-4"
-    max_retries: int = 3
-    environment: str = "production"
-    
-    @classmethod
-    def from_environment(cls) -> "ServiceConfig":
-        """Load configuration from environment with validation"""
-        api_key = os.getenv("API_KEY")
-        if not api_key:
-            raise ValueError("API_KEY environment variable required")
+        self.shutdown_event = asyncio.Event()
+        self.tasks = set()
         
-        return cls(
-            api_key=api_key,
-            timeout=int(os.getenv("TIMEOUT", "30")),
-            model=os.getenv("MODEL", "gpt-4"),
-            max_retries=int(os.getenv("MAX_RETRIES", "3")),
-            environment=os.getenv("ENVIRONMENT", "production")
-        )
-    
-    def validate(self):
-        """Validate configuration for environment"""
-        if self.environment == "production":
-            assert self.timeout >= 30, "Production timeout too short"
-            assert self.max_retries >= 3, "Production needs more retries"
-            assert "gpt-4" in self.model, "Production should use GPT-4"
+    def register_task(self, task):
+        """Register a task to track"""
+        self.tasks.add(task)
+        task.add_done_callback(self.tasks.discard)
+        
+    async def shutdown(self):
+        """Graceful shutdown sequence"""
+        logger.info("Starting graceful shutdown...")
+        
+        # Stop accepting new requests
+        self.shutdown_event.set()
+        
+        # Wait for in-flight requests (with timeout)
+        if self.tasks:
+            logger.info(f"Waiting for {len(self.tasks)} tasks to complete...")
+            
+            # Give tasks 30 seconds to complete
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*self.tasks, return_exceptions=True),
+                    timeout=30
+                )
+            except asyncio.TimeoutError:
+                logger.warning("Some tasks didn't complete in time")
+                
+        # Close connections
+        logger.info("Closing connections...")
+        if hasattr(self, 'db_pool'):
+            await self.db_pool.close()
+        if hasattr(self, 'redis_client'):
+            await self.redis_client.close()
+            
+        logger.info("Graceful shutdown complete")
+
+# Usage
+shutdown_handler = GracefulShutdown()
+
+# Register signal handlers
+for sig in (signal.SIGTERM, signal.SIGINT):
+    signal.signal(sig, lambda s, f: asyncio.create_task(shutdown_handler.shutdown()))
 ```
 
-#### 5. **Resource Exhaustion**
+## Best Practices
 
-Production systems must handle varying load without exhausting resources:
+1. **Design for Scale from Day One**
+   - Use connection pooling for all external services
+   - Implement request batching and rate limiting
+   - Plan for horizontal scaling with load balancing
 
-```python
-# DANGEROUS - Unbounded resource usage
-async def dangerous_parallel_processing(items):
-    # Creates unlimited concurrent tasks
-    tasks = [process_item(item) for item in items]
-    return await asyncio.gather(*tasks)  # Could create 10,000 tasks!
+2. **Implement Comprehensive Monitoring**
+   - Health checks for all components
+   - Metrics for performance tracking
+   - Distributed tracing for request flow
+   - Alerting for anomalies
 
-# SAFE - Bounded concurrency
-async def safe_parallel_processing(items, max_concurrent=10):
-    """Process items with bounded concurrency"""
-    semaphore = asyncio.Semaphore(max_concurrent)
-    
-    async def process_with_limit(item):
-        async with semaphore:
-            return await process_item(item)
-    
-    # Process in batches
-    results = []
-    for i in range(0, len(items), max_concurrent):
-        batch = items[i:i + max_concurrent]
-        batch_results = await asyncio.gather(
-            *[process_with_limit(item) for item in batch]
-        )
-        results.extend(batch_results)
-    
-    return results
+3. **Handle Errors Gracefully**
+   - Retry transient failures with exponential backoff
+   - Circuit breakers for failing dependencies  
+   - Graceful degradation when services are unavailable
+   - Clear error messages for users
 
-# Connection pooling
-from asyncpg import create_pool
+4. **Security First**
+   - Never hardcode secrets
+   - Use environment-specific configurations
+   - Implement authentication and authorization
+   - Regular security audits and updates
 
-class DatabaseManager:
-    """Production database management with pooling"""
-    
-    def __init__(self, database_url: str):
-        self.database_url = database_url
-        self.pool = None
-    
-    async def initialize(self):
-        """Initialize connection pool"""
-        self.pool = await create_pool(
-            self.database_url,
-            min_size=5,      # Minimum connections
-            max_size=20,     # Maximum connections
-            max_queries=50000,
-            max_inactive_connection_lifetime=300,
-            command_timeout=60
-        )
-    
-    async def execute_query(self, query: str, *args):
-        """Execute query with connection from pool"""
-        async with self.pool.acquire() as connection:
-            return await connection.fetch(query, *args)
-```
+5. **Plan for Maintenance**
+   - Blue-green deployments for zero downtime
+   - Database migrations without service interruption
+   - Feature flags for gradual rollouts
+   - Comprehensive logging for debugging
+
+6. **Test Production Scenarios**
+   - Load testing with realistic traffic patterns
+   - Chaos engineering to test failure recovery
+   - Double-texting scenario testing
+   - Multi-region deployment testing
 
 ## Key Takeaways
 
-1. **Design for Failure**: Production systems face network issues, service outages, and unexpected load. Build resilience into every component with retries, timeouts, and graceful degradation.
+1. **Architecture Matters**: LangGraph Server + Redis + PostgreSQL provides a solid foundation. Understand each component's role and optimize accordingly.
 
-2. **Handle Double-Texting**: Users will send multiple messages before receiving responses. Choose the right strategy (reject, enqueue, interrupt, rollback) based on your use case and implement it consistently.
+2. **Double-Texting is Real**: Users will send multiple messages. Choose the right strategy (reject/enqueue/interrupt/rollback) and implement it consistently.
 
-3. **Configuration Management**: Use environment-aware configuration with validation. Never hardcode values that might change between environments. Version your assistant configurations for safe experimentation.
+3. **Production is Different**: What works locally may fail at scale. Plan for concurrency, resource limits, and failure scenarios from the start.
 
-4. **Monitor Everything**: Implement comprehensive health checks, metrics, and logging. You can't fix what you can't see. Use tools like Prometheus, Grafana, and LangSmith for observability.
+4. **Monitor Everything**: You can't fix what you can't see. Implement comprehensive health checks, metrics, and logging.
 
-5. **Resource Management**: Bound all resources - connections, memory, concurrent operations. Production systems must handle varying load without exhausting resources or degrading performance.
+5. **Automate Operations**: Use Docker and Kubernetes for consistent deployments. Implement CI/CD for reliable releases.
 
-6. **Container Architecture**: Use Docker for consistency across environments. Orchestrate with Docker Compose for simple deployments or Kubernetes for scale. Always include health checks and resource limits.
+6. **Security is Non-Negotiable**: Protect API keys, implement rate limiting, validate inputs, and follow security best practices.
 
-7. **Secure by Default**: Never expose raw endpoints. Use API keys, implement rate limiting, validate all inputs, and follow security best practices. Store secrets properly and rotate them regularly.
+7. **Plan for Growth**: Design systems that can scale horizontally. Use caching, connection pooling, and async operations effectively.
 
 ## Next Steps
 
-Congratulations! You've completed the LangGraph Academy and are ready to build production AI systems. You now understand:
+Congratulations! You've completed the LangGraph Academy. You're now equipped to build and deploy production AI systems that can:
 
-- **Graph Construction**: Building stateful, multi-agent applications
-- **State Management**: Sophisticated patterns for maintaining context
-- **Human-in-the-Loop**: Safe AI with human oversight
-- **Parallelization**: High-performance concurrent processing
-- **Memory Systems**: Long-term context and personalization
-- **Production Deployment**: Reliable, scalable services
+- Handle real-world traffic with grace
+- Scale from prototype to production seamlessly  
+- Recover from failures automatically
+- Provide insights through comprehensive monitoring
+- Evolve safely with proper configuration management
 
-Your journey doesn't end here. The field of AI agents is rapidly evolving. Stay current with LangGraph updates, experiment with new patterns, and most importantly - build amazing things that help real users solve real problems.
+Continue your journey by exploring the agents-and-assistants guide for advanced patterns and best practices in building sophisticated AI applications.
 
-Remember: great AI applications aren't just about powerful models - they're about thoughtful design, robust engineering, and deep understanding of user needs. You now have all the tools to build them.
-
-Happy building!
+Remember: Production excellence isn't about perfection—it's about building systems that fail gracefully, recover quickly, and improve continuously. Your users depend on it.

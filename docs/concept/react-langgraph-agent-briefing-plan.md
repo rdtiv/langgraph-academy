@@ -1,4 +1,4 @@
-# React LangGraph Agent Briefing Plan
+# ReAct LangGraph Agent Briefing Plan
 ## Anthropic Sonnet with Thinking Enabled + Next.js Client + Tavily Search
 
 **Created**: 2025-05-26  
