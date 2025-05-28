@@ -214,11 +214,11 @@ llm_with_tools = llm.bind_tools(tools)
 ```yaml
 # LangGraph Platform API structure
 POST   /threads                                  # Create thread
-POST   /threads/{thread_id}/runs/stream         # Stream chat
-GET    /threads/{thread_id}/messages            # Get history
-PATCH  /threads/{thread_id}/state               # Update state
+POST   /threads/:threadId/runs/stream          # Stream chat
+GET    /threads/:threadId/messages             # Get history
+PATCH  /threads/:threadId/state                # Update state
 GET    /threads                                 # List threads
-DELETE /threads/{thread_id}                     # Delete thread
+DELETE /threads/:threadId                      # Delete thread
 ```
 
 ### Streaming Protocol
@@ -288,6 +288,9 @@ async def stream_events(app, thread_id: str, messages: List[BaseMessage]) -> Asy
         # Send done signal
         yield {"type": "done", "content": ""}
         
+        # Send done signal after all events
+        yield {"type": "done", "content": ""}
+        
     except Exception as e:
         yield {
             "type": "error",
@@ -316,7 +319,7 @@ async def generate_suggestions(messages: List[BaseMessage]) -> List[str]:
     
     # Use Haiku for lightweight suggestion generation
     haiku = ChatAnthropic(
-        model="claude-3-haiku-20240307",
+        model="claude-3-5-haiku-latest",
         temperature=0.7,
         max_tokens=200
     )
@@ -367,7 +370,7 @@ class AgentConfig:
     
 # Anthropic configuration
 anthropicConfig = {
-    "model": "claude-3-5-sonnet-20241022",  # Latest Sonnet
+    "model": "claude-sonnet-4-20250514",  # Latest Sonnet
     "temperature": 0.7,
     "max_tokens": 4096,
     "anthropic_beta": "prompt-caching-2024-07-31"
@@ -548,7 +551,7 @@ tavily = TavilySearchResults(
 tools = [tavily]
 
 llm = ChatAnthropic(
-    model="claude-3-5-sonnet-20241022",
+    model="claude-sonnet-4-20250514",
     temperature=0.7,
     anthropic_beta="prompt-caching-2024-07-31"
 )

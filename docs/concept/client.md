@@ -137,6 +137,7 @@ class LangGraphClient {
       baseURL,
       headers: {
         'Content-Type': 'application/json',
+        'X-API-Key': process.env.NEXT_PUBLIC_LANGGRAPH_API_KEY || '',
       },
     });
   }
@@ -326,8 +327,16 @@ export function useChat() {
 
   const sendMessage = useMutation({
     mutationFn: async (message: string) => {
-      if (!currentThread) {
-        throw new Error('No thread selected');
+      // Create thread if needed
+      let threadToUse = currentThread;
+      if (!threadToUse) {
+        try {
+          const newThread = await langgraphClient.createThread();
+          setCurrentThread(newThread);
+          threadToUse = newThread;
+        } catch (error) {
+          throw new Error('Failed to create thread');
+        }
       }
 
       // Add user message immediately
@@ -350,7 +359,7 @@ export function useChat() {
 
       try {
         for await (const chunk of langgraphClient.streamChat(
-          currentThread.thread_id,
+          threadToUse.thread_id || threadToUse.id,
           message
         )) {
           switch (chunk.type) {
