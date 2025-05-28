@@ -1,121 +1,114 @@
-# Next.js Client for LangGraph: Implementation Briefing
+# Next.js Client for LangGraph Implementation
 
 **Created**: 2025-05-26  
-**Last Modified**: 2025-05-26
+**Updated**: 2025-05-27
 
 ## Overview
 
-This briefing outlines how to build a production-ready Next.js application that serves as a client for your LangGraph deployment. The application will provide a ChatGPT-like interface with streaming messages, thinking indicators, smart suggestions, and thread management.
+This document describes the Next.js client implementation for the LangGraph agent. The client provides a modern chat interface with real-time streaming, thinking pattern display, follow-up suggestions, and thread management.
 
 ## Architecture Overview
 
 ```
 ┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
-│                 │     │                  │     │                 │
-│  Next.js App    │────▶│  Vercel Edge     │────▶│  LangGraph      │
-│  (React UI)     │     │  Functions       │     │  Server         │
-│                 │     │                  │     │                 │
+│  Next.js Client │────▶│  API Proxy Route │────▶│ LangGraph Dev   │
+│  (React + SSE)  │     │  (/api/langgraph)│     │  (Port 8123)    │
 └─────────────────┘     └──────────────────┘     └─────────────────┘
-     Browser                API Routes              Your Backend
+     Browser                Next.js Server           Local/Production
 ```
 
 ## Project Setup
 
-### 1. Initialize Next.js Project
+### 1. Dependencies
 
-```bash
-npx create-next-app@latest langgraph-chat --typescript --tailwind --app
-cd langgraph-chat
-
-# Install additional dependencies
-npm install @tanstack/react-query axios clsx date-fns react-markdown 
-npm install react-syntax-highlighter zustand sonner lucide-react
-npm install @radix-ui/react-scroll-area @radix-ui/react-tooltip
-npm install --save-dev @types/react-syntax-highlighter
+```json
+// package.json dependencies
+{
+  "dependencies": {
+    "next": "14.2.0",
+    "react": "^18",
+    "react-dom": "^18",
+    "@tanstack/react-query": "^5.40.0",
+    "zustand": "^4.5.2",
+    "clsx": "^2.1.1",
+    "tailwind-merge": "^2.3.0",
+    "sonner": "^1.4.41",
+    "lucide-react": "^0.378.0"
+  },
+  "devDependencies": {
+    "typescript": "^5",
+    "@types/react": "^18",
+    "@types/node": "^20",
+    "tailwindcss": "^3.4.1",
+    "postcss": "^8",
+    "autoprefixer": "^10.0.1"
+  }
+}
 ```
 
-### 2. Project Structure
+### 2. Actual Project Structure
 
 ```
-langgraph-chat/
-├── app/
-│   ├── layout.tsx
-│   ├── page.tsx
-│   ├── api/
-│   │   ├── threads/
-│   │   │   ├── route.ts
-│   │   │   └── [threadId]/
-│   │   │       ├── route.ts
-│   │   │       └── messages/route.ts
-│   │   └── chat/route.ts
-│   └── globals.css
-├── components/
-│   ├── chat/
-│   │   ├── ChatInterface.tsx
-│   │   ├── MessageList.tsx
-│   │   ├── MessageItem.tsx
-│   │   ├── ChatInput.tsx
-│   │   ├── ThinkingIndicator.tsx
-│   │   └── SuggestionsBar.tsx
-│   ├── sidebar/
-│   │   ├── ThreadList.tsx
-│   │   ├── ThreadItem.tsx
-│   │   └── NewThreadButton.tsx
-│   └── ui/
-│       └── (shadcn components)
-├── lib/
-│   ├── langgraph-client.ts
+client/
+├── src/
+│   ├── app/
+│   │   ├── api/
+│   │   │   └── langgraph/
+│   │   │       └── [...path]/
+│   │   │           └── route.ts      # API proxy
+│   │   ├── layout.tsx
+│   │   ├── page.tsx
+│   │   └── providers.tsx
+│   ├── components/
+│   │   └── chat/
+│   │       ├── ChatInterface.tsx
+│   │       ├── ChatInput.tsx
+│   │       ├── ChatPanel.tsx
+│   │       ├── MessageBubble.tsx
+│   │       ├── MessageList.tsx
+│   │       ├── StreamingMessage.tsx
+│   │       ├── SuggestionPills.tsx
+│   │       ├── ThinkingIndicator.tsx
+│   │       └── ThreadSidebar.tsx
 │   ├── hooks/
-│   │   ├── useChat.ts
-│   │   ├── useThreads.ts
-│   │   └── useStreaming.ts
-│   └── stores/
-│       ├── chatStore.ts
-│       └── threadStore.ts
-├── types/
-│   └── index.ts
-└── utils/
-    └── stream-parser.ts
+│   │   └── useChat.ts
+│   ├── lib/
+│   │   └── langgraph-client.ts
+│   ├── store/
+│   │   └── chat.ts                   # Zustand store
+│   └── types/
+│       └── index.ts
+├── package.json
+├── tsconfig.json
+└── .env.example
 ```
 
 ## Core Implementation
 
-### 1. LangGraph Client Wrapper
+### 1. Core Types
 
 ```typescript
-// lib/langgraph-client.ts
-import axios, { AxiosInstance } from 'axios';
-
-/**
- * Represents a conversation thread
- */
-export interface Thread {
-  thread_id: string;
-  created_at: string;
-  metadata: {
-    title?: string;
-    last_message?: string;
-  };
-}
-
-/**
- * Represents a message in the conversation
- */
+// types/index.ts
 export interface Message {
   id: string;
   role: 'human' | 'assistant' | 'system';
   content: string;
   timestamp: string;
-  metadata?: {
-    thinking?: string;
-    tool_use?: string;
-    [key: string]: any;
-  };
+  metadata?: Record<string, any>;
 }
 
-/**
- * Streaming chunk format matching agent output
- */
+export interface Thread {
+  id: string;
+  metadata: {
+    title: string;
+    created_at: string;
+    updated_at?: string;
+    [key: string]: any;
+  };
+  created_at: string;
+  updated_at: string;
+}
+
 export interface StreamChunk {
   type: 'message' | 'thinking' | 'suggestion' | 'tool_use' | 'error' | 'done';
   content: string;
@@ -125,96 +118,95 @@ export interface StreamChunk {
     error_type?: string;
     [key: string]: any;
   };
-}
+}```
+
+### 2. LangGraph Client
+
+```typescript
+// lib/langgraph-client.ts
+import { Thread, Message, StreamChunk } from '@/types';
 
 class LangGraphClient {
-  private client: AxiosInstance;
-  private baseURL: string;
+  private baseUrl: string;
 
-  constructor(baseURL: string = process.env.NEXT_PUBLIC_LANGGRAPH_URL!) {
-    this.baseURL = baseURL;
-    this.client = axios.create({
-      baseURL,
-      headers: {
-        'Content-Type': 'application/json',
-        'X-API-Key': process.env.NEXT_PUBLIC_LANGGRAPH_API_KEY || '',
-      },
-    });
+  constructor(baseUrl: string = process.env.NEXT_PUBLIC_API_ENDPOINT || '/api/langgraph') {
+    this.baseUrl = baseUrl;
   }
 
-  // Thread Management
   async createThread(metadata?: Record<string, any>): Promise<Thread> {
-    const defaultMetadata = {
-      title: `Chat ${new Date().toLocaleDateString()}`,
-      created_at: new Date().toISOString(),
-      ...metadata
-    };
-    const response = await this.client.post('/threads', { metadata: defaultMetadata });
-    return response.data;
+    const response = await fetch(`${this.baseUrl}/threads`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        metadata: {
+          title: `Chat ${new Date().toLocaleString()}`,
+          created_at: new Date().toISOString(),
+          ...metadata
+        }
+      }),
+    });
+    
+    if (!response.ok) throw new Error('Failed to create thread');
+    return response.json();
   }
 
-  async getThreads(): Promise<Thread[]> {
-    const response = await this.client.get('/threads');
-    return response.data;
-  }
-
-  async getThread(threadId: string): Promise<Thread> {
-    const response = await this.client.get(`/threads/${threadId}`);
-    return response.data;
+  async listThreads(): Promise<Thread[]> {
+    const response = await fetch(`${this.baseUrl}/threads`);
+    if (!response.ok) throw new Error('Failed to list threads');
+    return response.json();
   }
 
   async deleteThread(threadId: string): Promise<void> {
-    await this.client.delete(`/threads/${threadId}`);
+    const response = await fetch(`${this.baseUrl}/threads/${threadId}`, {
+      method: 'DELETE',
+    });
+    if (!response.ok) throw new Error('Failed to delete thread');
   }
 
-  // Streaming Chat
   async *streamChat(
     threadId: string,
-    message: string,
-    config?: Record<string, any>
+    message: string
   ): AsyncGenerator<StreamChunk> {
-    const response = await fetch(`${this.baseURL}/threads/${threadId}/runs/stream`, {
+    const response = await fetch(`${this.baseUrl}/threads/${threadId}/runs/stream`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        thread_id: threadId,
-        assistant_id: process.env.NEXT_PUBLIC_ASSISTANT_ID || 'react-agent',
+        assistant_id: 'agent',
         input: {
           messages: [{ role: 'human', content: message }],
         },
-        config: {
-          ...config,
-          stream_mode: 'messages-tuple',
-        },
+        stream_mode: 'events',
       }),
     });
 
     if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
+      throw new Error(`Stream error: ${response.status}`);
     }
 
     const reader = response.body!.getReader();
     const decoder = new TextDecoder();
-    let buffer = '';
 
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
 
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
+      const chunk = decoder.decode(value);
+      const lines = chunk.split('\n');
 
       for (const line of lines) {
         if (line.startsWith('data: ')) {
-          const data = line.slice(6);
-          if (data === '[DONE]') return;
-          
           try {
-            const chunk = JSON.parse(data);
-            yield this.parseChunk(chunk);
+            const data = JSON.parse(line.slice(6));
+            
+            // Validate StreamChunk structure
+            if (data && typeof data === 'object' && 'type' in data && 'content' in data) {
+              const validTypes = ['message', 'thinking', 'suggestion', 'tool_use', 'error', 'done'];
+              if (validTypes.includes(data.type)) {
+                yield data as StreamChunk;
+              }
+            }
           } catch (e) {
             console.error('Failed to parse chunk:', e);
           }
@@ -223,60 +215,39 @@ class LangGraphClient {
     }
   }
 
-  /**
-   * Parses streaming chunks from the agent
-   * @param chunk Raw chunk from SSE stream
-   * @returns Parsed StreamChunk with proper typing
-   */
-  private parseChunk(chunk: any): StreamChunk {
-    // Parse LangGraph streaming format - aligned with agent output
-    if (chunk.type === 'done') {
-      return {
-        type: 'done',
-        content: '',
-      };
-    }
-    
-    // All chunk types follow same format from agent
-    if (['message', 'thinking', 'suggestion', 'tool_use', 'error'].includes(chunk.type)) {
-      return {
-        type: chunk.type,
-        content: chunk.content || '',
-        metadata: chunk.metadata,
-      };
-    }
-    
-    // Default fallback
-    return {
-      type: 'message',
-      content: chunk.content || '',
-    };
-  }
 }
 
-// Singleton instance
-export const langgraphClient = new LangGraphClient();
+// Export singleton instance
+export const langgraphClient = new LangGraphClient(
+  process.env.NEXT_PUBLIC_API_ENDPOINT || '/api/langgraph'
+);
 ```
 
-### 2. Chat Store with Zustand
+### 3. Zustand Store
 
 ```typescript
-// lib/stores/chatStore.ts
+// store/chat.ts
 import { create } from 'zustand';
-import { Message, Thread } from '@/lib/langgraph-client';
+import { persist } from 'zustand/middleware';
+import { Message, Thread } from '@/types';
 
-interface ChatState {
-  currentThread: Thread | null;
-  messages: Message[];
+interface ChatStore {
+  // State
+  threads: Thread[];
+  currentThreadId: string | null;
+  messages: Record<string, Message[]>;
   isStreaming: boolean;
   streamingMessage: string;
   thinkingMessage: string;
   suggestions: string[];
   
   // Actions
-  setCurrentThread: (thread: Thread | null) => void;
-  addMessage: (message: Message) => void;
-  setMessages: (messages: Message[]) => void;
+  setThreads: (threads: Thread[]) => void;
+  addThread: (thread: Thread) => void;
+  removeThread: (threadId: string) => void;
+  setCurrentThreadId: (threadId: string | null) => void;
+  addMessage: (threadId: string, message: Message) => void;
+  setMessages: (threadId: string, messages: Message[]) => void;
   setStreaming: (isStreaming: boolean) => void;
   appendToStreamingMessage: (content: string) => void;
   setThinkingMessage: (content: string) => void;
@@ -284,39 +255,72 @@ interface ChatState {
   clearStreamingMessage: () => void;
 }
 
-export const useChatStore = create<ChatState>((set) => ({
-  currentThread: null,
-  messages: [],
-  isStreaming: false,
-  streamingMessage: '',
-  thinkingMessage: '',
-  suggestions: [],
+export const useChatStore = create<ChatStore>()(
+  persist(
+    (set) => ({
+      threads: [],
+      currentThreadId: null,
+      messages: {},
+      isStreaming: false,
+      streamingMessage: '',
+      thinkingMessage: '',
+      suggestions: [],
 
-  setCurrentThread: (thread) => set({ currentThread: thread }),
-  addMessage: (message) => 
-    set((state) => ({ messages: [...state.messages, message] })),
-  setMessages: (messages) => set({ messages }),
-  setStreaming: (isStreaming) => set({ isStreaming }),
-  appendToStreamingMessage: (content) =>
-    set((state) => ({ streamingMessage: state.streamingMessage + content })),
-  setThinkingMessage: (content) => set({ thinkingMessage: content }),
-  setSuggestions: (suggestions) => set({ suggestions }),
-  clearStreamingMessage: () => set({ streamingMessage: '' }),
-}));
+      setThreads: (threads) => set({ threads }),
+      addThread: (thread) => 
+        set((state) => ({ threads: [...state.threads, thread] })),
+      removeThread: (threadId) =>
+        set((state) => ({
+          threads: state.threads.filter(t => t.id !== threadId),
+          messages: { ...state.messages, [threadId]: undefined },
+        })),
+      setCurrentThreadId: (threadId) => set({ currentThreadId: threadId }),
+      addMessage: (threadId, message) =>
+        set((state) => ({
+          messages: {
+            ...state.messages,
+            [threadId]: [...(state.messages[threadId] || []), message],
+          },
+        })),
+      setMessages: (threadId, messages) =>
+        set((state) => ({
+          messages: { ...state.messages, [threadId]: messages },
+        })),
+      setStreaming: (isStreaming) => set({ isStreaming }),
+      appendToStreamingMessage: (content) =>
+        set((state) => ({ streamingMessage: state.streamingMessage + content })),
+      setThinkingMessage: (content) => set({ thinkingMessage: content }),
+      setSuggestions: (suggestions) => set({ suggestions }),
+      clearStreamingMessage: () => set({ streamingMessage: '' }),
+    }),
+    {
+      name: 'langgraph-chat',
+      partialize: (state) => ({ 
+        threads: state.threads,
+        currentThreadId: state.currentThreadId,
+        messages: state.messages,
+      }),
+    }
+  )
+);
 ```
 
-### 3. Streaming Hook
+### 4. Chat Hook
 
 ```typescript
-// lib/hooks/useChat.ts
+// hooks/useChat.ts
+import { useState, useCallback } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import { langgraphClient } from '@/lib/langgraph-client';
-import { useChatStore } from '@/lib/stores/chatStore';
+import { useChatStore } from '@/store/chat';
 import { toast } from 'sonner';
 
 export function useChat() {
   const {
-    currentThread,
+    currentThreadId,
+    threads,
+    addThread,
+    setCurrentThreadId,
     addMessage,
     setStreaming,
     appendToStreamingMessage,
@@ -327,28 +331,27 @@ export function useChat() {
 
   const sendMessage = useMutation({
     mutationFn: async (message: string) => {
-      // Create thread if needed
-      let threadToUse = currentThread;
-      if (!threadToUse) {
-        try {
-          const newThread = await langgraphClient.createThread();
-          setCurrentThread(newThread);
-          threadToUse = newThread;
-        } catch (error) {
-          throw new Error('Failed to create thread');
-        }
+      // Get or create thread
+      let threadId = currentThreadId;
+      let thread = threads.find(t => t.id === threadId);
+      
+      if (!thread) {
+        thread = await langgraphClient.createThread();
+        addThread(thread);
+        setCurrentThreadId(thread.id);
+        threadId = thread.id;
       }
 
-      // Add user message immediately
+      // Add user message
       const userMessage = {
         id: Date.now().toString(),
         role: 'human' as const,
         content: message,
         timestamp: new Date().toISOString(),
       };
-      addMessage(userMessage);
+      addMessage(threadId, userMessage);
 
-      // Start streaming
+      // Reset streaming state
       setStreaming(true);
       clearStreamingMessage();
       setThinkingMessage('');
@@ -358,18 +361,15 @@ export function useChat() {
       const suggestions: string[] = [];
 
       try {
-        for await (const chunk of langgraphClient.streamChat(
-          threadToUse.thread_id || threadToUse.id,
-          message
-        )) {
+        for await (const chunk of langgraphClient.streamChat(threadId, message)) {
           switch (chunk.type) {
             case 'thinking':
               setThinkingMessage(chunk.content);
               break;
             
             case 'message':
-              appendToStreamingMessage(chunk.content);
               assistantMessage += chunk.content;
+              appendToStreamingMessage(chunk.content);
               break;
             
             case 'suggestion':
@@ -377,18 +377,29 @@ export function useChat() {
               setSuggestions(suggestions);
               break;
             
+            case 'tool_use':
+              // Optionally display tool usage
+              console.log('Tool usage:', chunk.content);
+              break;
+              
             case 'error':
               throw new Error(chunk.content);
+              
+            case 'done':
+              // Stream complete
+              break;
           }
         }
 
-        // Add complete assistant message
-        addMessage({
-          id: Date.now().toString(),
-          role: 'assistant',
-          content: assistantMessage,
-          timestamp: new Date().toISOString(),
-        });
+        // Save complete assistant message
+        if (assistantMessage) {
+          addMessage(threadId, {
+            id: Date.now().toString(),
+            role: 'assistant',
+            content: assistantMessage,
+            timestamp: new Date().toISOString(),
+          });
+        }
 
       } catch (error) {
         console.error('Chat error:', error);
@@ -409,645 +420,172 @@ export function useChat() {
 }
 ```
 
-### 4. Main Chat Interface
+### 5. API Proxy Route
 
 ```typescript
-// components/chat/ChatInterface.tsx
-'use client';
-
-import { useState } from 'react';
-import { MessageList } from './MessageList';
-import { ChatInput } from './ChatInput';
-import { ThinkingIndicator } from './ThinkingIndicator';
-import { SuggestionsBar } from './SuggestionsBar';
-import { useChatStore } from '@/lib/stores/chatStore';
-import { useChat } from '@/lib/hooks/useChat';
-import { ScrollArea } from '@/components/ui/scroll-area';
-
-export function ChatInterface() {
-  const { 
-    messages, 
-    isStreaming, 
-    streamingMessage, 
-    thinkingMessage,
-    suggestions,
-    currentThread 
-  } = useChatStore();
-  const { sendMessage, isLoading } = useChat();
-  const [input, setInput] = useState('');
-
-  const handleSend = () => {
-    if (input.trim() && !isLoading) {
-      sendMessage(input);
-      setInput('');
-    }
-  };
-
-  const handleSuggestionClick = (suggestion: string) => {
-    setInput(suggestion);
-  };
-
-  if (!currentThread) {
-    return (
-      <div className="flex h-full items-center justify-center">
-        <p className="text-muted-foreground">
-          Select a thread or create a new one to start chatting
-        </p>
-      </div>
-    );
-  }
-
-  return (
-    <div className="flex h-full flex-col">
-      {/* Messages Area */}
-      <ScrollArea className="flex-1 p-4">
-        <MessageList 
-          messages={messages}
-          streamingMessage={streamingMessage}
-          isStreaming={isStreaming}
-        />
-        {thinkingMessage && (
-          <ThinkingIndicator message={thinkingMessage} />
-        )}
-      </ScrollArea>
-
-      {/* Suggestions */}
-      {suggestions.length > 0 && (
-        <SuggestionsBar 
-          suggestions={suggestions}
-          onSuggestionClick={handleSuggestionClick}
-        />
-      )}
-
-      {/* Input Area */}
-      <div className="border-t p-4">
-        <ChatInput
-          value={input}
-          onChange={setInput}
-          onSend={handleSend}
-          disabled={isLoading}
-          placeholder="Type a message..."
-        />
-      </div>
-    </div>
-  );
-}
-```
-
-### 5. Message Display Component
-
-```typescript
-// components/chat/MessageItem.tsx
-import { Message } from '@/lib/langgraph-client';
-import { cn } from '@/lib/utils';
-import ReactMarkdown from 'react-markdown';
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
-import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
-import { User, Bot } from 'lucide-react';
-
-interface MessageItemProps {
-  message: Message;
-  isStreaming?: boolean;
-}
-
-export function MessageItem({ message, isStreaming }: MessageItemProps) {
-  const isHuman = message.role === 'human';
-
-  return (
-    <div className={cn(
-      'group flex gap-3 py-4',
-      isHuman ? 'flex-row-reverse' : 'flex-row'
-    )}>
-      {/* Avatar */}
-      <div className={cn(
-        'flex h-8 w-8 shrink-0 items-center justify-center rounded-full',
-        isHuman ? 'bg-primary text-primary-foreground' : 'bg-muted'
-      )}>
-        {isHuman ? <User size={16} /> : <Bot size={16} />}
-      </div>
-
-      {/* Message Content */}
-      <div className={cn(
-        'flex-1 space-y-2',
-        isHuman ? 'text-right' : 'text-left'
-      )}>
-        <div className={cn(
-          'inline-block rounded-lg px-4 py-2',
-          isHuman 
-            ? 'bg-primary text-primary-foreground' 
-            : 'bg-muted'
-        )}>
-          <ReactMarkdown
-            className="prose prose-sm dark:prose-invert max-w-none"
-            components={{
-              code({ node, inline, className, children, ...props }) {
-                const match = /language-(\w+)/.exec(className || '');
-                return !inline && match ? (
-                  <SyntaxHighlighter
-                    style={oneDark}
-                    language={match[1]}
-                    PreTag="div"
-                    {...props}
-                  >
-                    {String(children).replace(/\n$/, '')}
-                  </SyntaxHighlighter>
-                ) : (
-                  <code className={className} {...props}>
-                    {children}
-                  </code>
-                );
-              },
-            }}
-          >
-            {message.content}
-          </ReactMarkdown>
-          {isStreaming && (
-            <span className="inline-block h-4 w-1 animate-pulse bg-current ml-1" />
-          )}
-        </div>
-        <p className="text-xs text-muted-foreground">
-          {new Date(message.timestamp).toLocaleTimeString()}
-        </p>
-      </div>
-    </div>
-  );
-}
-```
-
-### 6. Thread Sidebar
-
-```typescript
-// components/sidebar/ThreadList.tsx
-'use client';
-
-import { useEffect } from 'react';
-import { useQuery } from '@tanstack/react-query';
-import { langgraphClient } from '@/lib/langgraph-client';
-import { useChatStore } from '@/lib/stores/chatStore';
-import { ThreadItem } from './ThreadItem';
-import { NewThreadButton } from './NewThreadButton';
-import { ScrollArea } from '@/components/ui/scroll-area';
-import { Skeleton } from '@/components/ui/skeleton';
-
-export function ThreadList() {
-  const { currentThread, setCurrentThread } = useChatStore();
-  
-  const { data: threads, isLoading } = useQuery({
-    queryKey: ['threads'],
-    queryFn: () => langgraphClient.getThreads(),
-    refetchInterval: 30000, // Refresh every 30s
-  });
-
-  // Auto-select first thread if none selected
-  useEffect(() => {
-    if (!currentThread && threads && threads.length > 0) {
-      setCurrentThread(threads[0]);
-    }
-  }, [threads, currentThread, setCurrentThread]);
-
-  return (
-    <div className="flex h-full flex-col">
-      <div className="p-4">
-        <NewThreadButton />
-      </div>
-      
-      <ScrollArea className="flex-1">
-        <div className="space-y-2 p-4 pt-0">
-          {isLoading ? (
-            <>
-              <Skeleton className="h-16 w-full" />
-              <Skeleton className="h-16 w-full" />
-              <Skeleton className="h-16 w-full" />
-            </>
-          ) : (
-            threads?.map((thread) => (
-              <ThreadItem
-                key={thread.thread_id}
-                thread={thread}
-                isActive={currentThread?.thread_id === thread.thread_id}
-                onClick={() => setCurrentThread(thread)}
-              />
-            ))
-          )}
-        </div>
-      </ScrollArea>
-    </div>
-  );
-}
-```
-
-### 7. API Routes
-
-```typescript
-// app/api/chat/route.ts
+// app/api/langgraph/[...path]/route.ts
 import { NextRequest } from 'next/server';
 
-const LANGGRAPH_URL = process.env.LANGGRAPH_URL!;
-const LANGGRAPH_API_KEY = process.env.LANGGRAPH_API_KEY!;
+const LANGGRAPH_ENDPOINT = process.env.LANGGRAPH_ENDPOINT || 'http://localhost:8123';
+const LANGGRAPH_API_KEY = process.env.LANGGRAPH_API_KEY || 'dev-key';
 
-export async function POST(request: NextRequest) {
+export async function GET(
+  request: NextRequest,
+  { params }: { params: { path: string[] } }
+) {
+  const path = params.path.join('/');
+  
+  // Validate API key
+  if (!LANGGRAPH_API_KEY) {
+    return Response.json({ error: 'API key not configured' }, { status: 500 });
+  }
+  
   try {
-    const body = await request.json();
-    const { thread_id, message, config } = body;
-    
-    // Forward to LangGraph server with proper endpoint
-    const response = await fetch(`${LANGGRAPH_URL}/threads/${thread_id}/runs/stream`, {
+    const response = await fetch(`${LANGGRAPH_ENDPOINT}/${path}`, {
+      headers: {
+        'X-API-Key': LANGGRAPH_API_KEY,
+      },
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      return Response.json({ error }, { status: response.status });
+    }
+
+    const data = await response.json();
+    return Response.json(data);
+  } catch (error) {
+    return Response.json({ error: 'Failed to fetch from LangGraph' }, { status: 500 });
+  }
+}
+
+export async function POST(
+  request: NextRequest,
+  { params }: { params: { path: string[] } }
+) {
+  const path = params.path.join('/');
+  const body = await request.text();
+  
+  // Validate API key
+  if (!LANGGRAPH_API_KEY) {
+    return Response.json({ error: 'API key not configured' }, { status: 500 });
+  }
+  
+  // Handle streaming endpoints
+  if (path.includes('/runs/stream')) {
+    try {
+      const response = await fetch(`${LANGGRAPH_ENDPOINT}/${path}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-API-Key': LANGGRAPH_API_KEY,
+        },
+        body,
+      });
+
+      if (!response.ok) {
+        const error = await response.text();
+        return Response.json({ error }, { status: response.status });
+      }
+
+      // Return SSE stream with CORS headers
+      return new Response(response.body, {
+        headers: {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          'Connection': 'keep-alive',
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+          'Access-Control-Allow-Headers': 'Content-Type',
+        },
+      });
+    } catch (error) {
+      return Response.json({ error: 'Failed to stream from LangGraph' }, { status: 500 });
+    }
+  }
+  
+  // Handle regular endpoints
+  try {
+    const response = await fetch(`${LANGGRAPH_ENDPOINT}/${path}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'X-API-Key': LANGGRAPH_API_KEY,
       },
-      body: JSON.stringify({
-        assistant_id: process.env.ASSISTANT_ID || 'react-agent',
-        input: {
-          messages: [{ role: 'human', content: message }],
-        },
-        config: config || {},
-      }),
+      body,
     });
 
-    // Return streaming response
-    return new Response(response.body, {
-      headers: {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache',
-        'Connection': 'keep-alive',
-      },
-    });
+    if (!response.ok) {
+      const error = await response.text();
+      return Response.json({ error }, { status: response.status });
+    }
+
+    const data = await response.json();
+    return Response.json(data);
   } catch (error) {
-    console.error('Chat API error:', error);
-    return Response.json(
-      { error: 'Internal server error' },
-      { status: 500 }
-    );
+    return Response.json({ error: 'Failed to post to LangGraph' }, { status: 500 });
   }
 }
 ```
 
-### 8. Main Layout
-
-```typescript
-// app/layout.tsx
-import { Inter } from 'next/font/google';
-import { Providers } from './providers';
-import { ThreadList } from '@/components/sidebar/ThreadList';
-import { Toaster } from 'sonner';
-import './globals.css';
-
-const inter = Inter({ subsets: ['latin'] });
-
-export default function RootLayout({
-  children,
-}: {
-  children: React.ReactNode;
-}) {
-  return (
-    <html lang="en" className="h-full">
-      <body className={`${inter.className} h-full`}>
-        <Providers>
-          <div className="flex h-full">
-            {/* Sidebar */}
-            <aside className="w-64 border-r bg-muted/50">
-              <ThreadList />
-            </aside>
-            
-            {/* Main Content */}
-            <main className="flex-1">
-              {children}
-            </main>
-          </div>
-          <Toaster position="top-right" />
-        </Providers>
-      </body>
-    </html>
-  );
-}
-```
-
-## Deployment to Vercel
-
-### 1. Environment Variables
-
-Create `.env.local` for development:
-
-```env
-# Client-side variables (exposed to browser)
-NEXT_PUBLIC_LANGGRAPH_URL=http://localhost:8123
-NEXT_PUBLIC_ASSISTANT_ID=react-agent
-
-# Server-side variables (for API routes)
-LANGGRAPH_URL=http://localhost:8123
-LANGGRAPH_API_KEY=your-api-key
-```
-
-### 2. Vercel Configuration
-
-```json
-// vercel.json
-{
-  "functions": {
-    "app/api/chat/route.ts": {
-      "maxDuration": 60
-    }
-  },
-  "env": {
-    "LANGGRAPH_URL": "@langgraph-url",
-    "LANGGRAPH_API_KEY": "@langgraph-api-key"
-  }
-}
-```
-
-### 3. Deploy to Vercel
+## Environment Variables
 
 ```bash
-# Install Vercel CLI
-npm i -g vercel
+# .env.local
+# For local development with langgraph dev
+NEXT_PUBLIC_LANGGRAPH_API_URL=http://localhost:8123
+NEXT_PUBLIC_LANGGRAPH_API_KEY=dev-key
 
-# Deploy
-vercel
+# Server-side variables for API proxy route
+LANGGRAPH_ENDPOINT=http://localhost:8123
+LANGGRAPH_API_KEY=dev-key
 
-# Set environment variables
-vercel env add LANGGRAPH_URL production
-vercel env add LANGGRAPH_API_KEY production
-vercel env add NEXT_PUBLIC_LANGGRAPH_URL production
-vercel env add NEXT_PUBLIC_ASSISTANT_ID production
+# For production deployment
+# NEXT_PUBLIC_LANGGRAPH_API_URL=https://your-deployment-url
+# NEXT_PUBLIC_LANGGRAPH_API_KEY=your-actual-api-key
 ```
 
-## Key Features Implementation
+## Key Features
 
-### 1. Thinking Messages
+### 1. Real-time Streaming
+- SSE-based streaming with proper chunk parsing
+- Handles thinking, message, tool usage, and suggestion events
+- Graceful error handling and timeout protection
 
-Show LLM's reasoning process:
+### 2. Thread Management
+- Persistent thread storage with Zustand
+- Automatic thread creation on first message
+- Thread switching and deletion support
 
-```typescript
-// components/chat/ThinkingIndicator.tsx
-import { Brain } from 'lucide-react';
+### 3. UI Components
+- Thinking indicator for transparency
+- Follow-up suggestion pills
+- Streaming message display
+- Tool usage notifications
 
-export function ThinkingIndicator({ message }: { message: string }) {
-  return (
-    <div className="flex items-start gap-2 py-2 text-muted-foreground">
-      <Brain className="mt-1 h-4 w-4 animate-pulse" />
-      <div className="flex-1 italic text-sm">
-        {message || 'Thinking...'}
-      </div>
-    </div>
-  );
-}
-```
+### 4. Type Safety
+- Full TypeScript coverage
+- Shared types between client and server
+- Runtime validation for stream chunks
 
-### 2. Smart Suggestions
+## Deployment
 
-```typescript
-// components/chat/SuggestionsBar.tsx
-import { ArrowRight } from 'lucide-react';
-
-interface SuggestionsBarProps {
-  suggestions: string[];
-  onSuggestionClick: (suggestion: string) => void;
-}
-
-export function SuggestionsBar({ 
-  suggestions, 
-  onSuggestionClick 
-}: SuggestionsBarProps) {
-  return (
-    <div className="border-t bg-muted/50 p-4">
-      <p className="mb-2 text-sm text-muted-foreground">
-        Suggested follow-ups:
-      </p>
-      <div className="flex flex-wrap gap-2">
-        {suggestions.map((suggestion, index) => (
-          <button
-            key={index}
-            onClick={() => onSuggestionClick(suggestion)}
-            className="flex items-center gap-1 rounded-full bg-background px-3 py-1 text-sm hover:bg-accent"
-          >
-            {suggestion}
-            <ArrowRight className="h-3 w-3" />
-          </button>
-        ))}
-      </div>
-    </div>
-  );
-}
-```
-
-### 3. Streaming with Abort
-
-```typescript
-// lib/hooks/useChat.ts (enhanced)
-export function useChat() {
-  const abortControllerRef = useRef<AbortController | null>(null);
-
-  const abort = () => {
-    abortControllerRef.current?.abort();
-  };
-
-  const sendMessage = useMutation({
-    mutationFn: async (message: string) => {
-      abortControllerRef.current = new AbortController();
-      
-      // Pass signal to fetch
-      const response = await fetch('/api/chat', {
-        method: 'POST',
-        signal: abortControllerRef.current.signal,
-        // ... rest of config
-      });
-      
-      // ... streaming logic
-    },
-  });
-
-  return { sendMessage, abort, isLoading };
-}
-```
-
-## Performance Optimizations
-
-### 1. Message Virtualization
-
-For long conversations:
-
+### Development
 ```bash
-npm install @tanstack/react-virtual
-```
-
-```typescript
-// components/chat/VirtualMessageList.tsx
-import { useVirtualizer } from '@tanstack/react-virtual';
-
-export function VirtualMessageList({ messages }: { messages: Message[] }) {
-  const parentRef = useRef<HTMLDivElement>(null);
-  
-  const virtualizer = useVirtualizer({
-    count: messages.length,
-    getScrollElement: () => parentRef.current,
-    estimateSize: () => 100,
-    overscan: 5,
-  });
-
-  return (
-    <div ref={parentRef} className="h-full overflow-auto">
-      <div
-        style={{
-          height: `${virtualizer.getTotalSize()}px`,
-          width: '100%',
-          position: 'relative',
-        }}
-      >
-        {virtualizer.getVirtualItems().map((virtualItem) => (
-          <div
-            key={virtualItem.key}
-            style={{
-              position: 'absolute',
-              top: 0,
-              left: 0,
-              width: '100%',
-              height: `${virtualItem.size}px`,
-              transform: `translateY(${virtualItem.start}px)`,
-            }}
-          >
-            <MessageItem message={messages[virtualItem.index]} />
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-```
-
-### 2. Optimistic Updates
-
-```typescript
-// Immediately show user message while waiting for response
-const optimisticUpdate = () => {
-  const tempId = `temp-${Date.now()}`;
-  addMessage({
-    id: tempId,
-    role: 'human',
-    content: input,
-    timestamp: new Date().toISOString(),
-  });
-  
-  // Remove temp message when real one arrives
-  // ...
-};
-```
-
-## Security Considerations
-
-### 1. API Route Protection
-
-```typescript
-// middleware.ts
-import { NextResponse } from 'next/server';
-import type { NextRequest } from 'next/server';
-
-export function middleware(request: NextRequest) {
-  // Check for API key in production
-  if (process.env.NODE_ENV === 'production') {
-    const apiKey = request.headers.get('x-api-key');
-    if (!apiKey || apiKey !== process.env.API_SECRET) {
-      return NextResponse.json(
-        { error: 'Unauthorized' },
-        { status: 401 }
-      );
-    }
-  }
-  
-  return NextResponse.next();
-}
-
-export const config = {
-  matcher: '/api/:path*',
-};
-```
-
-### 2. Rate Limiting
-
-```typescript
-// lib/rate-limit.ts
-import { Ratelimit } from '@upstash/ratelimit';
-import { Redis } from '@upstash/redis';
-
-const redis = new Redis({
-  url: process.env.UPSTASH_REDIS_REST_URL!,
-  token: process.env.UPSTASH_REDIS_REST_TOKEN!,
-});
-
-export const ratelimit = new Ratelimit({
-  redis,
-  limiter: Ratelimit.slidingWindow(10, '1 m'), // 10 requests per minute
-});
-```
-
-## Integration with ReAct Agent
-
-### Complete Working Integration
-
-The Next.js client is designed to work seamlessly with the ReAct LangGraph Agent:
-
-1. **Streaming Protocol Match**
-   - Agent outputs: `thinking`, `message`, `tool_use`, `suggestion`, `error`
-   - Client handles: All these types with proper UI representation
-
-2. **Configuration Alignment**
-   ```env
-   # Both use same assistant ID
-   NEXT_PUBLIC_ASSISTANT_ID=react-agent
-   ```
-
-3. **Error Handling**
-   ```typescript
-   // Enhanced error handling for agent errors
-   try {
-     for await (const chunk of langgraphClient.streamChat(...)) {
-       if (chunk.type === 'error') {
-         toast.error(`Agent error: ${chunk.content}`);
-         // Log to monitoring service
-         console.error('Agent error:', chunk);
-       }
-     }
-   } catch (error) {
-     // Network or server errors
-     toast.error('Connection error. Please try again.');
-   }
-   ```
-
-4. **Tool Use Display**
-   ```typescript
-   // Show when agent is using tools
-   if (chunk.type === 'tool_use') {
-     // Display tool usage in UI
-     const toolMessage = `🔍 ${chunk.content}`;
-     // Could update UI state or show in a separate indicator
-   }
-   ```
-
-### Local Development Setup
-
-For local development with LangGraph Platform:
-
-```bash
-# 1. Start LangGraph Platform locally
-langgraph up
-
-# 2. In another terminal, start Next.js
+npm install
 npm run dev
+# Runs on http://localhost:3000
 ```
 
-The LangGraph Platform handles all infrastructure complexity - no Docker needed!
+### Production
+```bash
+npm run build
+npm start
+```
 
-## Summary
+### Vercel Deployment
+```bash
+vercel --prod
+```
 
-This Next.js application provides:
-
-1. **Real-time Streaming**: Server-sent events for smooth message streaming
-2. **Thread Management**: Sidebar with conversation history
-3. **Rich UI**: Markdown rendering, syntax highlighting, thinking indicators
-4. **Smart Suggestions**: Context-aware follow-up prompts
-5. **Production Ready**: Error handling, loading states, optimistic updates
-6. **Vercel Optimized**: Edge functions, proper caching, environment management
-7. **Agent Integration**: Full compatibility with ReAct LangGraph agent
-
-The architecture separates concerns cleanly, uses modern React patterns (hooks, server components), and integrates seamlessly with your LangGraph backend. The UI follows ChatGPT/Claude patterns that users are familiar with while adding LangGraph-specific features like thinking messages and suggestions.
+The client connects to the LangGraph agent via the API proxy route, providing a secure and efficient way to stream responses while keeping API keys server-side.

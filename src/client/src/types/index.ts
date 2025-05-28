@@ -23,7 +23,6 @@ export interface Message {
  */
 export interface Thread {
   id: string;
-  thread_id?: string; // For backward compatibility
   metadata: {
     title: string;
     created_at: string;

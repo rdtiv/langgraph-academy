@@ -208,13 +208,13 @@ code .env.local
 Edit `.env.local`:
 
 ```bash
-# For local development, use these settings:
-NEXT_PUBLIC_LANGGRAPH_API_KEY=your_langgraph_api_key_here
-NEXT_PUBLIC_API_ENDPOINT=http://localhost:3000/api/langgraph
+# For local development with langgraph dev (default port 8123)
+NEXT_PUBLIC_LANGGRAPH_API_URL=http://localhost:8123
+NEXT_PUBLIC_LANGGRAPH_API_KEY=dev-key
 
-# Server-side variables (keep these as is for now)
-LANGGRAPH_ENDPOINT=https://your-agent.langgraph.com
-LANGGRAPH_API_KEY=your_langgraph_api_key_here
+# Server-side variables for API proxy route
+LANGGRAPH_ENDPOINT=http://localhost:8123
+LANGGRAPH_API_KEY=dev-key
 ```
 
 ### Step 5: Understanding the Next.js Structure

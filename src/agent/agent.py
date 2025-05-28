@@ -165,61 +165,72 @@ async def stream_events(app, thread_id: str, messages: List[BaseMessage]) -> Asy
             - content: The actual content to display
             - metadata: Optional metadata (tool name, query, etc.)
     """
+    import asyncio
+    
     config = {"configurable": {"thread_id": thread_id}}
+    timeout = float(os.getenv("STREAM_TIMEOUT_SECONDS", "300"))  # 5 minute default
     
     try:
-        async for event in app.astream_events(
-            {"messages": messages},
-            config=config,
-            version="v2"
-        ):
-            if event["event"] == "on_chat_model_stream":
-                # Extract and stream thinking patterns
-                if "claude-sonnet-4" in str(event.get("metadata", {}).get("model", "")):
-                    content = event["data"]["chunk"].content
-                    if content:
-                        # Check for thinking pattern
-                        thinking_match = re.search(r'<thinking>(.*?)</thinking>', content, re.DOTALL)
-                        if thinking_match:
-                            yield {
-                                "type": "thinking",
-                                "content": thinking_match.group(1).strip()
+        # Add timeout protection
+        async with asyncio.timeout(timeout):
+            async for event in app.astream_events(
+                {"messages": messages},
+                config=config,
+                version="v2"
+            ):
+                if event["event"] == "on_chat_model_stream":
+                    # Extract and stream thinking patterns
+                    if "claude-sonnet-4" in str(event.get("metadata", {}).get("model", "")):
+                        content = event["data"]["chunk"].content
+                        if content:
+                            # Check for thinking pattern
+                            thinking_match = re.search(r'<thinking>(.*?)</thinking>', content, re.DOTALL)
+                            if thinking_match:
+                                yield {
+                                    "type": "thinking",
+                                    "content": thinking_match.group(1).strip()
+                                }
+                            
+                            # Stream regular content (excluding thinking)
+                            cleaned_content = re.sub(r'<thinking>.*?</thinking>', '', content, flags=re.DOTALL)
+                            if cleaned_content.strip():
+                                yield {
+                                    "type": "message",
+                                    "content": cleaned_content
+                                }
+                
+                elif event["event"] == "on_tool_start":
+                    # Stream tool usage
+                    tool_name = event["metadata"].get("tool_name", "unknown")
+                    if tool_name == "tavily_search_results":
+                        tool_input = event["data"].get("input", {})
+                        yield {
+                            "type": "tool_use",
+                            "content": f"Searching the web for: {tool_input.get('query', 'information')}",
+                            "metadata": {
+                                "tool": "tavily_search",
+                                "query": tool_input.get("query", "")
                             }
-                        
-                        # Stream regular content (excluding thinking)
-                        cleaned_content = re.sub(r'<thinking>.*?</thinking>', '', content, flags=re.DOTALL)
-                        if cleaned_content.strip():
-                            yield {
-                                "type": "message",
-                                "content": cleaned_content
-                            }
-            
-            elif event["event"] == "on_tool_start":
-                # Stream tool usage
-                tool_name = event["metadata"].get("tool_name", "unknown")
-                if tool_name == "tavily_search_results":
-                    tool_input = event["data"].get("input", {})
-                    yield {
-                        "type": "tool_use",
-                        "content": f"Searching the web for: {tool_input.get('query', 'information')}",
-                        "metadata": {
-                            "tool": "tavily_search",
-                            "query": tool_input.get("query", "")
                         }
+            
+            # Generate suggestions after message completes
+            if messages:
+                suggestions = await generate_suggestions(messages)
+                for suggestion in suggestions:
+                    yield {
+                        "type": "suggestion",
+                        "content": suggestion
                     }
+            
+            # Send done signal after all events
+            yield {"type": "done", "content": ""}
         
-        # Generate suggestions after message completes
-        if messages:
-            suggestions = await generate_suggestions(messages)
-            for suggestion in suggestions:
-                yield {
-                    "type": "suggestion",
-                    "content": suggestion
-                }
-        
-        # Send done signal after all events
-        yield {"type": "done", "content": ""}
-        
+    except asyncio.TimeoutError:
+        yield {
+            "type": "error",
+            "content": "Stream timeout exceeded. Please try again.",
+            "metadata": {"error_type": "TimeoutError"}
+        }
     except Exception as e:
         yield {
             "type": "error",
@@ -248,7 +259,7 @@ async def generate_suggestions(messages: List[BaseMessage]) -> List[str]:
     
     # Use Haiku for lightweight suggestion generation
     haiku = ChatAnthropic(
-        model="claude-3-5-haiku-latest",
+        model=os.getenv("ANTHROPIC_SUGGESTIONS_MODEL", "claude-3-5-haiku-latest"),
         temperature=0.7,
         max_tokens=200
     )

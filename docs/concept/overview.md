@@ -2,7 +2,7 @@
 
 **Created**: 2025-05-27  
 **Updated**: 2025-05-27  
-**Purpose**: Complete architectural overview of the Next.js client and ReAct-pattern LangGraph agent integration
+**Purpose**: Executive overview of the complete AI assistant solution with thinking transparency
 
 ---
 

@@ -50,7 +50,7 @@ export function useChat() {
 
       try {
         for await (const chunk of langgraphClient.streamChat(
-          threadToUse.thread_id || threadToUse.id,
+          threadToUse.id,
           message
         )) {
           switch (chunk.type) {
