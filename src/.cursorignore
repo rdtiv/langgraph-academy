@@ -1,0 +1,60 @@
+# Cursor AI - Files to ignore for context
+
+# Build outputs
+.next/
+out/
+dist/
+build/
+*.pyc
+__pycache__/
+
+# Dependencies
+node_modules/
+venv/
+.venv/
+env/
+
+# Environment files (security)
+.env
+.env.local
+.env.production
+.env.development
+
+# Large generated files
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Test coverage
+coverage/
+.coverage
+htmlcov/
+
+# IDE and system
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
+logs/
+
+# Database
+*.db
+*.sqlite
+
+# Temporary
+tmp/
+temp/
+.tmp/
+
+# Documentation (if you want to focus on code)
+# docs/
+
+# Test files (uncomment if needed)
+# **/*.test.ts
+# **/*.test.tsx
+# **/*.spec.ts
+# **/*.spec.py

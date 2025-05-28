@@ -1,0 +1,152 @@
+# Cursor AI Rules for LangGraph + Next.js Project
+
+## Project Context
+You are working on a conversational AI system with:
+- Python LangGraph agent using Claude Sonnet 4 with ReAct pattern
+- Next.js 14 client with TypeScript and real-time streaming
+- Zustand for state management
+- SSE for streaming responses
+
+## Code Style Guidelines
+
+### Python (Agent)
+- Use type hints for all functions
+- Follow PEP 8 style guide
+- Use async/await for all I/O operations
+- Add docstrings to all functions
+- Handle errors with try/except blocks
+- Use environment variables for configuration
+
+### TypeScript/React (Client)
+- Use TypeScript strict mode
+- Prefer function components with hooks
+- Use async/await over promises
+- Handle loading and error states
+- Follow Next.js 14 App Router patterns
+- Use Tailwind CSS for styling
+
+## Key Patterns
+
+### Streaming Events
+Always maintain this interface between agent and client:
+```typescript
+interface StreamChunk {
+  type: 'message' | 'thinking' | 'suggestion' | 'tool_use' | 'error' | 'done';
+  content: string;
+  metadata?: Record<string, any>;
+}
+```
+
+### Error Handling
+- Agent: Yield error chunks in stream
+- Client: Show toast notifications
+- Always provide user-friendly error messages
+
+### State Management
+- Use Zustand store for global state
+- Keep component state minimal
+- Persist thread data to localStorage
+
+## Best Practices
+
+### Security
+- Never expose API keys to client
+- Use environment variables
+- Validate all inputs
+- Sanitize user messages
+
+### Performance
+- Stream responses for better UX
+- Use React.memo for expensive components
+- Implement virtual scrolling for long chats
+- Cache thread data appropriately
+
+### Testing
+- Test streaming edge cases
+- Mock API responses
+- Test error scenarios
+- Verify type safety
+
+## Common Pitfalls to Avoid
+
+1. **Don't block the stream** - Always yield events promptly
+2. **Don't forget cleanup** - Close streams and connections
+3. **Don't mutate state directly** - Use Zustand actions
+4. **Don't ignore TypeScript errors** - Fix them properly
+5. **Don't hardcode values** - Use environment variables
+
+## File Naming Conventions
+
+### Python
+- Snake_case for files: `agent_utils.py`
+- PascalCase for classes: `ThinkingState`
+- snake_case for functions: `stream_events`
+
+### TypeScript/React
+- PascalCase for components: `ChatInterface.tsx`
+- camelCase for utilities: `streamParser.ts`
+- kebab-case for routes: `api/langgraph/[...path]`
+
+## Import Order
+
+### Python
+```python
+# Standard library
+import os
+import re
+
+# Third party
+from langchain import ...
+from langgraph import ...
+
+# Local
+from .utils import ...
+```
+
+### TypeScript
+```typescript
+// React
+import { useState, useEffect } from 'react'
+
+// Third party
+import { create } from 'zustand'
+
+// Local components
+import { ChatInput } from '@/components/chat/ChatInput'
+
+// Types
+import type { Message } from '@/types'
+
+// Styles (if any)
+import styles from './styles.module.css'
+```
+
+## Git Commit Messages
+- Use present tense: "Add feature" not "Added feature"
+- Be specific: "Add thinking pattern extraction to agent"
+- Reference issues: "Fix streaming timeout (#123)"
+
+## When Suggesting Code
+
+1. **Always preserve existing patterns** in the codebase
+2. **Maintain type safety** - no `any` types without good reason
+3. **Handle edge cases** - empty states, errors, loading
+4. **Include error handling** for all async operations
+5. **Add comments** only for complex logic
+6. **Keep functions small** and focused
+7. **Use descriptive names** that explain purpose
+
+## Environment-Specific Rules
+
+### Development
+- Use `langgraph dev` for agent
+- Use `npm run dev` for client
+- Keep console.logs for debugging
+
+### Production
+- Remove all console.logs
+- Enable error tracking
+- Use production environment variables
+- Optimize bundle size
+
+Remember: The goal is clean, maintainable code that provides an excellent user experience with real-time AI interactions.
