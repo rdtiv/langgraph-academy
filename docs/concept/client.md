@@ -86,6 +86,9 @@ langgraph-chat/
 // lib/langgraph-client.ts
 import axios, { AxiosInstance } from 'axios';
 
+/**
+ * Represents a conversation thread
+ */
 export interface Thread {
   thread_id: string;
   created_at: string;
@@ -95,18 +98,33 @@ export interface Thread {
   };
 }
 
+/**
+ * Represents a message in the conversation
+ */
 export interface Message {
   id: string;
-  role: 'human' | 'assistant' | 'system' | 'thinking';
+  role: 'human' | 'assistant' | 'system';
   content: string;
   timestamp: string;
-  metadata?: Record<string, any>;
+  metadata?: {
+    thinking?: string;
+    tool_use?: string;
+    [key: string]: any;
+  };
 }
 
+/**
+ * Streaming chunk format matching agent output
+ */
 export interface StreamChunk {
-  type: 'message' | 'thinking' | 'suggestion' | 'error';
+  type: 'message' | 'thinking' | 'suggestion' | 'tool_use' | 'error' | 'done';
   content: string;
-  metadata?: Record<string, any>;
+  metadata?: {
+    tool?: string;
+    query?: string;
+    error_type?: string;
+    [key: string]: any;
+  };
 }
 
 class LangGraphClient {
@@ -119,14 +137,18 @@ class LangGraphClient {
       baseURL,
       headers: {
         'Content-Type': 'application/json',
-        'X-API-Key': process.env.NEXT_PUBLIC_LANGGRAPH_API_KEY,
       },
     });
   }
 
   // Thread Management
   async createThread(metadata?: Record<string, any>): Promise<Thread> {
-    const response = await this.client.post('/threads', { metadata });
+    const defaultMetadata = {
+      title: `Chat ${new Date().toLocaleDateString()}`,
+      created_at: new Date().toISOString(),
+      ...metadata
+    };
+    const response = await this.client.post('/threads', { metadata: defaultMetadata });
     return response.data;
   }
 
@@ -150,15 +172,14 @@ class LangGraphClient {
     message: string,
     config?: Record<string, any>
   ): AsyncGenerator<StreamChunk> {
-    const response = await fetch(`${this.baseURL}/runs/stream`, {
+    const response = await fetch(`${this.baseURL}/threads/${threadId}/runs/stream`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'X-API-Key': process.env.NEXT_PUBLIC_LANGGRAPH_API_KEY!,
       },
       body: JSON.stringify({
         thread_id: threadId,
-        assistant_id: 'task_maistro',
+        assistant_id: process.env.NEXT_PUBLIC_ASSISTANT_ID || 'react-agent',
         input: {
           messages: [{ role: 'human', content: message }],
         },
@@ -201,26 +222,30 @@ class LangGraphClient {
     }
   }
 
+  /**
+   * Parses streaming chunks from the agent
+   * @param chunk Raw chunk from SSE stream
+   * @returns Parsed StreamChunk with proper typing
+   */
   private parseChunk(chunk: any): StreamChunk {
-    // Parse LangGraph streaming format
-    if (chunk.type === 'message_chunk') {
+    // Parse LangGraph streaming format - aligned with agent output
+    if (chunk.type === 'done') {
       return {
-        type: 'message',
-        content: chunk.content,
-        metadata: chunk.metadata,
-      };
-    } else if (chunk.type === 'thinking') {
-      return {
-        type: 'thinking',
-        content: chunk.content,
-      };
-    } else if (chunk.type === 'suggestion') {
-      return {
-        type: 'suggestion',
-        content: chunk.content,
+        type: 'done',
+        content: '',
       };
     }
     
+    // All chunk types follow same format from agent
+    if (['message', 'thinking', 'suggestion', 'tool_use', 'error'].includes(chunk.type)) {
+      return {
+        type: chunk.type,
+        content: chunk.content || '',
+        metadata: chunk.metadata,
+      };
+    }
+    
+    // Default fallback
     return {
       type: 'message',
       content: chunk.content || '',
@@ -228,6 +253,7 @@ class LangGraphClient {
   }
 }
 
+// Singleton instance
 export const langgraphClient = new LangGraphClient();
 ```
 
@@ -613,15 +639,22 @@ const LANGGRAPH_API_KEY = process.env.LANGGRAPH_API_KEY!;
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
+    const { thread_id, message, config } = body;
     
-    // Forward to LangGraph server
-    const response = await fetch(`${LANGGRAPH_URL}/runs/stream`, {
+    // Forward to LangGraph server with proper endpoint
+    const response = await fetch(`${LANGGRAPH_URL}/threads/${thread_id}/runs/stream`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'X-API-Key': LANGGRAPH_API_KEY,
       },
-      body: JSON.stringify(body),
+      body: JSON.stringify({
+        assistant_id: process.env.ASSISTANT_ID || 'react-agent',
+        input: {
+          messages: [{ role: 'human', content: message }],
+        },
+        config: config || {},
+      }),
     });
 
     // Return streaming response
@@ -689,8 +722,11 @@ export default function RootLayout({
 Create `.env.local` for development:
 
 ```env
+# Client-side variables (exposed to browser)
 NEXT_PUBLIC_LANGGRAPH_URL=http://localhost:8123
-NEXT_PUBLIC_LANGGRAPH_API_KEY=your-api-key
+NEXT_PUBLIC_ASSISTANT_ID=react-agent
+
+# Server-side variables (for API routes)
 LANGGRAPH_URL=http://localhost:8123
 LANGGRAPH_API_KEY=your-api-key
 ```
@@ -722,10 +758,10 @@ npm i -g vercel
 vercel
 
 # Set environment variables
-vercel env add LANGGRAPH_URL
-vercel env add LANGGRAPH_API_KEY
-vercel env add NEXT_PUBLIC_LANGGRAPH_URL
-vercel env add NEXT_PUBLIC_LANGGRAPH_API_KEY
+vercel env add LANGGRAPH_URL production
+vercel env add LANGGRAPH_API_KEY production
+vercel env add NEXT_PUBLIC_LANGGRAPH_URL production
+vercel env add NEXT_PUBLIC_ASSISTANT_ID production
 ```
 
 ## Key Features Implementation
@@ -936,6 +972,63 @@ export const ratelimit = new Ratelimit({
 });
 ```
 
+## Integration with ReAct Agent
+
+### Complete Working Integration
+
+The Next.js client is designed to work seamlessly with the ReAct LangGraph Agent:
+
+1. **Streaming Protocol Match**
+   - Agent outputs: `thinking`, `message`, `tool_use`, `suggestion`, `error`
+   - Client handles: All these types with proper UI representation
+
+2. **Configuration Alignment**
+   ```env
+   # Both use same assistant ID
+   NEXT_PUBLIC_ASSISTANT_ID=react-agent
+   ```
+
+3. **Error Handling**
+   ```typescript
+   // Enhanced error handling for agent errors
+   try {
+     for await (const chunk of langgraphClient.streamChat(...)) {
+       if (chunk.type === 'error') {
+         toast.error(`Agent error: ${chunk.content}`);
+         // Log to monitoring service
+         console.error('Agent error:', chunk);
+       }
+     }
+   } catch (error) {
+     // Network or server errors
+     toast.error('Connection error. Please try again.');
+   }
+   ```
+
+4. **Tool Use Display**
+   ```typescript
+   // Show when agent is using tools
+   if (chunk.type === 'tool_use') {
+     // Display tool usage in UI
+     const toolMessage = `🔍 ${chunk.content}`;
+     // Could update UI state or show in a separate indicator
+   }
+   ```
+
+### Local Development Setup
+
+For local development with LangGraph Platform:
+
+```bash
+# 1. Start LangGraph Platform locally
+langgraph up
+
+# 2. In another terminal, start Next.js
+npm run dev
+```
+
+The LangGraph Platform handles all infrastructure complexity - no Docker needed!
+
 ## Summary
 
 This Next.js application provides:
@@ -946,5 +1039,6 @@ This Next.js application provides:
 4. **Smart Suggestions**: Context-aware follow-up prompts
 5. **Production Ready**: Error handling, loading states, optimistic updates
 6. **Vercel Optimized**: Edge functions, proper caching, environment management
+7. **Agent Integration**: Full compatibility with ReAct LangGraph agent
 
 The architecture separates concerns cleanly, uses modern React patterns (hooks, server components), and integrates seamlessly with your LangGraph backend. The UI follows ChatGPT/Claude patterns that users are familiar with while adding LangGraph-specific features like thinking messages and suggestions.
