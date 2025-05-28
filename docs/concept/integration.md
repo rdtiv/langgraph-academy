@@ -30,7 +30,11 @@ This guide provides the definitive integration approach for connecting the ReAct
 ANTHROPIC_API_KEY=your_anthropic_key
 TAVILY_API_KEY=your_tavily_key
 LANGCHAIN_API_KEY=your_langchain_key
-ANTHROPIC_MODEL=claude-sonnet-4-20250514  # Latest Sonnet
+ANTHROPIC_MODEL=claude-sonnet-4-20250514  # Can override default model
+
+# Optional: LangSmith tracing
+LANGCHAIN_TRACING_V2=true
+LANGCHAIN_PROJECT=react-agent-prod
 ```
 
 ### Client Environment Variables
@@ -144,6 +148,8 @@ async def stream_events(app, thread_id: str, messages: List[BaseMessage]) -> Asy
 2. **Selective Tool Use**: Only invokes Tavily when web search is needed
 3. **Suggestion Generation**: Uses Claude Haiku (`claude-3-5-haiku-latest`) for lightweight suggestions
 4. **Error Handling**: Comprehensive try-catch with typed error responses
+5. **Prompt Caching**: Uses Anthropic beta feature for cost optimization
+6. **Optimized Search**: Tavily configured with `search_depth="advanced"` and `include_raw_content=False`
 
 ## Client Implementation Details
 
@@ -255,7 +261,7 @@ export function useChat() {
               break;
             
             case 'tool_use':
-              // Display tool usage in UI
+              // Display tool usage inline with message stream
               appendToStreamingMessage(`\n🔍 ${chunk.content}\n`);
               break;
             
@@ -490,11 +496,19 @@ describe('Agent-Client Integration', () => {
 
 ## Security Considerations
 
-1. **API Key Management**: Never expose server-side keys to client
-2. **Input Validation**: Sanitize user messages before sending
-3. **Rate Limiting**: Implement per-user request limits
-4. **CORS Configuration**: Restrict origins in production
-5. **Content Security Policy**: Prevent XSS attacks
+### Implemented Security Features
+1. **API Key Management**: Server-side proxy keeps keys secure
+2. **Thread Isolation**: Users only access their own threads
+3. **HTTPS Transport**: All communications encrypted
+4. **Error Type Metadata**: Errors include type for debugging without exposing internals
+
+### Recommended Additional Security (Not in Base Code)
+1. **Rate Limiting**: Implement per-user request limits
+2. **Request Signing**: Add HMAC signatures for API requests
+3. **API Key Rotation**: Implement key rotation mechanism
+4. **Input Validation**: Additional sanitization beyond basic XSS protection
+5. **CORS Configuration**: Restrict origins in production
+6. **Content Security Policy**: Prevent XSS attacks
 
 ## Common Issues and Solutions
 

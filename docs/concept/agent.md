@@ -545,15 +545,18 @@ When responding:
 
 # Initialize tools and LLM
 tavily = TavilySearchResults(
-    max_results=3,
+    max_results=5,
+    search_depth="advanced",
+    include_answer=True,
+    include_raw_content=False,  # Optimize response size
     description="Search the web for current information. Use ONLY when you need up-to-date information beyond your training data."
 )
 tools = [tavily]
 
 llm = ChatAnthropic(
-    model="claude-sonnet-4-20250514",
+    model=os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-20250514"),
     temperature=0.7,
-    anthropic_beta="prompt-caching-2024-07-31"
+    anthropic_beta="prompt-caching-2024-07-31"  # Enable prompt caching for cost optimization
 )
 llm_with_tools = llm.bind_tools(tools)
 

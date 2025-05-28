@@ -1,0 +1,21 @@
+{
+  "name": "react-agent",
+  "version": "1.0.0",
+  "description": "ReAct agent with Anthropic Claude and Tavily search",
+  "entry_point": "agent.py",
+  "graphs": {
+    "agent": "agent:app"
+  },
+  "models": {
+    "primary": "claude-sonnet-4-20250514",
+    "suggestions": "claude-3-5-haiku-latest"
+  },
+  "tools": ["tavily_search"],
+  "environment_variables": [
+    "ANTHROPIC_API_KEY",
+    "TAVILY_API_KEY",
+    "LANGCHAIN_API_KEY"
+  ],
+  "python_version": "3.11",
+  "dependencies": "requirements.txt"
+}
